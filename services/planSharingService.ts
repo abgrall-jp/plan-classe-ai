@@ -11,6 +11,49 @@ import {
   writeBatch
 } from 'firebase/firestore';
 import { getStudentPhoto } from './photoLibraryService';
+import { getLocalTeacherAccount, getImpersonatedTeacher } from './teacherAuthService';
+
+/**
+ * Propriétaire d'un plan : l'enseignant connecté (ou celui que le Super Admin incarne).
+ */
+export interface PlanOwner {
+  uid: string;
+  email?: string;
+  classes?: string[];
+  isSuperAdmin?: boolean;
+}
+
+export const getActivePlanOwner = (): PlanOwner | null => {
+  const acc = getImpersonatedTeacher() || getLocalTeacherAccount();
+  if (!acc || !acc.uid) return null;
+  return { uid: acc.uid, email: acc.email, classes: acc.classes, isSuperAdmin: acc.role === 'super_admin' };
+};
+
+const normEmail = (email?: string | null) => (email || '').trim().toLowerCase();
+
+/**
+ * Un plan appartient à un enseignant si son uid ou son e-mail correspond.
+ * Les anciens plans sans propriétaire restent visibles pour le Super Admin et pour l'enseignant
+ * dont le profil contient la classe, afin qu'ils puissent être récupérés en les republiant.
+ */
+export const isPlanOwnedBy = (plan: PublishedPlan, owner: PlanOwner | null): boolean => {
+  if (!plan) return false;
+  if (!plan.teacherId && !plan.teacherEmail) {
+    if (!owner || owner.isSuperAdmin) return true;
+    const planClasses = (plan.className || '').split(',').map(c => c.trim().toLowerCase());
+    return (owner.classes || []).some(c => planClasses.includes(c.trim().toLowerCase()));
+  }
+  if (!owner) return false;
+  if (plan.teacherId && plan.teacherId === owner.uid) return true;
+  const email = normEmail(owner.email);
+  return !!email && normEmail(plan.teacherEmail) === email;
+};
+
+export const filterPlansForOwner = (plans: PublishedPlan[], owner: PlanOwner | null): PublishedPlan[] =>
+  (plans || []).filter(p => isPlanOwnedBy(p, owner));
+
+const ownerFields = (owner: PlanOwner | null) =>
+  owner ? { teacherId: owner.uid, ...(owner.email ? { teacherEmail: owner.email } : {}) } : {};
 
 export interface StudentPasswordEntry {
   password?: string; // Cleartext or hashed string password
@@ -277,9 +320,13 @@ export const reconcileLocalPlansToFirestore = async (): Promise<void> => {
     const batch = writeBatch(db);
     let count = 0;
 
+    const owner = getActivePlanOwner();
     for (const plan of localPlans) {
       if (!plan || !plan.id) continue;
+      if (plan.id.startsWith('demo-')) continue;
       const remote = remotePlanMap.get(plan.id);
+      // Ne jamais réécrire dans la base le plan d'un autre enseignant resté dans le cache de ce navigateur.
+      if (!isPlanOwnedBy(remote || plan, owner)) continue;
 
       // If remote already exists and has photos, skip
       const remoteHasPhotos = remote?.placements?.some(p => !!p.photoUrl);
@@ -328,6 +375,8 @@ export const duplicatePlanToPeriod = async (
 ): Promise<PublishedPlan> => {
   const newPlan: Omit<PublishedPlan, 'id' | 'updatedAt'> = {
     teacherName: originalPlan.teacherName,
+    teacherId: originalPlan.teacherId,
+    teacherEmail: originalPlan.teacherEmail,
     className: originalPlan.className,
     period: targetPeriod,
     allowStudentSelfPlacement: originalPlan.allowStudentSelfPlacement,
@@ -347,14 +396,20 @@ export const savePublishedPlan = async (
   const normTeacher = (plan.teacherName || '').trim().toLowerCase();
   const normClass = (plan.className || '').trim().toLowerCase();
   const normPeriod = (plan.period || '').trim().toLowerCase();
+  const activeOwner = getActivePlanOwner();
+  const owner: PlanOwner | null = plan.teacherId
+    ? { uid: plan.teacherId, email: plan.teacherEmail, classes: activeOwner?.classes }
+    : activeOwner;
 
-  // Search for existing plan for same teacher, class, and period to update it instead of duplicating
+  // Search for an existing plan of the SAME OWNER for this class and period to update it instead of duplicating.
+  // Plans without owner (older versions) are matched by teacher name and are then attached to the current owner.
   const localOrDbPlans = await getPublishedPlans();
   const existing = localOrDbPlans.find(p => {
-    const pTeacher = p.teacherName.trim().toLowerCase();
     const pClass = p.className.trim().toLowerCase();
     const pPeriod = p.period.trim().toLowerCase();
-    return pTeacher === normTeacher && pClass === normClass && pPeriod === normPeriod;
+    if (pClass !== normClass || pPeriod !== normPeriod) return false;
+    if (p.teacherId || p.teacherEmail) return isPlanOwnedBy(p, owner);
+    return p.teacherName.trim().toLowerCase() === normTeacher && isPlanOwnedBy(p, owner);
   });
 
   let targetId: string;
@@ -397,6 +452,7 @@ export const savePublishedPlan = async (
 
   const newRecord: PublishedPlan = {
     ...plan,
+    ...ownerFields(owner),
     id: targetId,
     cellObstacles,
     placements: sanitizedPlacements,
@@ -476,18 +532,15 @@ export const syncClassRosterWithCurrentPlans = async (
   teacherName?: string,
   customPasswords?: Record<string | number, StudentPasswordEntry>
 ): Promise<PublishedPlan[]> => {
-  const currentPlans = await getPublishedPlans();
+  const owner = getActivePlanOwner();
+  // Only the current teacher's plans are synchronized: never another teacher's class with the same name.
+  const currentPlans = filterPlansForOwner(await getPublishedPlans(), owner);
   const normTarget = targetClassName.trim().toLowerCase();
 
   const matchingPlans = currentPlans.filter(p => {
     if (!p.className) return false;
     const classes = p.className.split(',').map(c => c.trim().toLowerCase());
-    return (
-      classes.includes(normTarget) ||
-      p.className.trim().toLowerCase() === normTarget ||
-      p.className.toLowerCase().includes(normTarget) ||
-      normTarget.includes(p.className.toLowerCase())
-    );
+    return classes.includes(normTarget) || p.className.trim().toLowerCase() === normTarget;
   });
 
   if (matchingPlans.length === 0) {
@@ -510,7 +563,8 @@ export const syncClassRosterWithCurrentPlans = async (
 
       const newPlanRecord: PublishedPlan = {
         id: newPlanId,
-        teacherName: teacherName || 'M. Abgrall (Mathématiques)',
+        ...ownerFields(owner),
+        teacherName: teacherName || 'Enseignant',
         className: targetClassName.trim(),
         period: 'Période 1 (Septembre - Toussaint)',
         allowStudentSelfPlacement: true,
@@ -638,6 +692,7 @@ export const syncClassRosterWithCurrentPlans = async (
 
     const updatedPlanRecord: PublishedPlan = {
       ...plan,
+      ...(plan.teacherId || plan.teacherEmail ? {} : ownerFields(owner)),
       placements: finalPlacements,
       studentPasswords: updatedPasswords,
       updatedAt: new Date().toISOString(),
@@ -692,6 +747,7 @@ export const duplicatePublishedPlanForClass = async (planId: string, newClassNam
 
   const duplicatedPlan: PublishedPlan = {
     ...originalPlan,
+    ...(originalPlan.teacherId || originalPlan.teacherEmail ? {} : ownerFields(getActivePlanOwner())),
     id: newId,
     className: targetClassName,
     updatedAt: new Date().toISOString(),

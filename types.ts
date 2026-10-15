@@ -96,6 +96,7 @@ export interface PublishedPlan {
   id: string;
   teacherName: string;
   teacherId?: string;
+  teacherEmail?: string;
   className: string;
   period: string;
   academicYear?: string;

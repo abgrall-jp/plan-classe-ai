@@ -36,7 +36,7 @@ const IMPERSONATE_KEY = 'superadmin_impersonate_target_v1';
 export const isSuperAdminEmail = (email: string | null | undefined): boolean => {
   if (!email) return false;
   const lower = email.toLowerCase().trim();
-  return lower === 'alimatlea@gmail.com' || lower.startsWith('alimatlea');
+  return lower === 'alimatlea@gmail.com';
 };
 
 // Default profile generator
@@ -47,8 +47,8 @@ export const createDefaultProfileForEmail = (
   photoURL?: string | null
 ): TeacherAccount => {
   const isSuper = isSuperAdminEmail(email);
-  let firstName = 'Mathieu';
-  let lastName = 'Abgrall';
+  let firstName = '';
+  let lastName = '';
 
   if (displayName) {
     const parts = displayName.trim().split(' ');
@@ -69,8 +69,9 @@ export const createDefaultProfileForEmail = (
     email: email || 'prof@enseignant.fr',
     firstName,
     lastName,
-    disciplines: isSuper ? ['Administration Globale', 'Informatique'] : ['Mathématiques', 'SNT'],
-    classes: isSuper ? ['Toutes les classes'] : ['3ème A', '3ème B', '4ème A', 'Option SNT'],
+    disciplines: isSuper ? ['Administration Globale', 'Informatique'] : [],
+    // Un nouvel enseignant commence sans classe : il ajoute les siennes dans son profil.
+    classes: isSuper ? ['Toutes les classes'] : [],
     role: isSuper ? 'super_admin' : 'teacher',
     photoURL: photoURL || undefined,
     updatedAt: new Date().toISOString(),
@@ -154,13 +155,9 @@ export const loginAsSuperAdminFallback = async (password: string): Promise<Teach
     const result = await signInWithEmailAndPassword(auth, 'alimatlea@gmail.com', password.trim());
     return await fetchOrCreateTeacherProfile(result.user);
   } catch (err: any) {
-    console.warn('Firebase Email Auth for Super Admin failed/offline, using fallback profile:', err);
-    const superAdminProfile = createDefaultProfileForEmail(
-      'admin-alimatlea-1',
-      'alimatlea@gmail.com',
-      'JP Abgrall'
-    );
-    return await syncTeacherProfileToFirestore(superAdminProfile);
+    // Plus de profil Super Admin de secours : un mot de passe refusé ne doit jamais ouvrir l'accès administrateur.
+    console.warn('Firebase Email Auth for Super Admin failed:', err);
+    throw new Error("Connexion Administrateur refusée : mot de passe incorrect ou réseau indisponible.");
   }
 };
 
@@ -188,12 +185,12 @@ export const loginWithEmail = async (email: string, pass: string): Promise<Teach
   } catch (err: any) {
     console.warn('Firebase Email Auth Failed, using fallback profile:', err);
 
-    // Smooth fallback for teacher or super admin
-    const localProfile = createDefaultProfileForEmail(
-      isSuper ? 'admin-alimatlea-1' : `user-${Date.now()}`,
-      email.trim(),
-      isSuper ? 'JP Abgrall' : undefined
-    );
+    // Profil de secours uniquement si le réseau bloque Firebase, jamais pour un mot de passe refusé,
+    // et jamais avec les droits Super Admin.
+    if (err?.code !== 'auth/network-request-failed' || isSuper) {
+      throw new Error('Connexion refusée : e-mail ou mot de passe incorrect.');
+    }
+    const localProfile = createDefaultProfileForEmail(`user-${Date.now()}`, email.trim());
     return await syncTeacherProfileToFirestore(localProfile);
   }
 };
@@ -254,36 +251,6 @@ export const logoutTeacher = async (): Promise<void> => {
 export const fetchAllTeachersForAdmin = async (): Promise<TeacherAccount[]> => {
   const defaultList: TeacherAccount[] = [
     createDefaultProfileForEmail('admin-alimatlea-1', 'alimatlea@gmail.com', 'JP Abgrall'),
-    {
-      uid: 'prof-abgrall-1',
-      email: 'm.abgrall@etablissement.fr',
-      firstName: 'Mathieu',
-      lastName: 'Abgrall',
-      disciplines: ['Mathématiques', 'SNT'],
-      classes: ['3ème A', '3ème B', '4ème A', 'Option SNT'],
-      role: 'teacher',
-      updatedAt: new Date().toISOString(),
-    },
-    {
-      uid: 'prof-dubois-2',
-      email: 'mme.dubois@etablissement.fr',
-      firstName: 'Sophie',
-      lastName: 'Dubois',
-      disciplines: ['Français', 'Lettres Classiques'],
-      classes: ['4ème B', '5ème A', '6ème B'],
-      role: 'teacher',
-      updatedAt: new Date().toISOString(),
-    },
-    {
-      uid: 'prof-martin-3',
-      email: 'j.martin@etablissement.fr',
-      firstName: 'Jean',
-      lastName: 'Martin',
-      disciplines: ['Histoire-Géographie'],
-      classes: ['3ème A', '4ème B', '5ème B'],
-      role: 'teacher',
-      updatedAt: new Date().toISOString(),
-    }
   ];
 
   try {
