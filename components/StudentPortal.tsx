@@ -8,6 +8,7 @@ import {
   deduplicatePlacements,
   getStudentRemarks
 } from '../services/planSharingService';
+import { StudentPlacement } from '../types';
 import { UserIcon } from './icons/UserIcon';
 import { GridIcon } from './icons/GridIcon';
 import { useSeatingColors, getSeatBorderStyle } from '../services/seatingColorService';

@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { parseStudentList } from '../services/geminiService';
-import { Student, SavedLayout, StudentPlacement } from '../types';
+import { Student, SavedLayout, StudentPlacement, StudentLocation } from '../types';
 import { UploadIcon } from './icons/UploadIcon';
 import { SheetIcon } from './icons/SheetIcon';
 import { FilePlusIcon } from './icons/FilePlusIcon';
@@ -24,7 +24,8 @@ import {
   fillPlanPlacements,
   STANDARD_PERIODS,
   StudentPasswordEntry,
-  deduplicatePlacements
+  deduplicatePlacements,
+  filterPlansForOwner
 } from '../services/planSharingService';
 import { TeacherAuthHeader } from './TeacherAuthHeader';
 import {
@@ -55,9 +56,9 @@ export interface TeacherProfile {
 }
 
 const DEFAULT_TEACHER_PROFILE: TeacherProfile = {
-  firstName: 'Mathieu',
-  lastName: 'Abgrall',
-  disciplines: ['Mathématiques', 'SNT'],
+  firstName: '',
+  lastName: '',
+  disciplines: [],
   classes: [],
 };
 
@@ -220,8 +221,8 @@ const PlanPreviewGridComponent: React.FC<PlanPreviewGridProps> = ({
                 } else {
                   await clearPlanPlacements(plan.id);
                 }
+                // La liste parente se met à jour via l'abonnement temps réel aux plans publiés.
                 const fresh = await getPublishedPlans();
-                setPublishedDbPlans(fresh);
                 if (onSelectPlanForPreview) {
                   const updated = fresh.find(fp => fp.id === plan.id);
                   if (updated) onSelectPlanForPreview(updated.id);
@@ -614,7 +615,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
   const [newProfileClassInput, setNewProfileClassInput] = useState('');
 
   // Class Selection & Period state
-  const [teacherName, setTeacherName] = useState(`M. ${profile.lastName}`);
+  const [teacherName, setTeacherName] = useState(profile.lastName ? `M. ${profile.lastName}` : '');
   const [periodName, setPeriodName] = useState('Trimestre 1 - 2026');
   const [selectedPublishPeriods, setSelectedPublishPeriods] = useState<string[]>(['Trimestre 1 - 2026']);
   const [step1DuplicatePlanId, setStep1DuplicatePlanId] = useState<string | null>(null);
@@ -687,7 +688,12 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
   const classFileInputRef = useRef<HTMLInputElement>(null);
 
   // Database plans state
-  const [publishedDbPlans, setPublishedDbPlans] = useState<PublishedPlan[]>([]);
+  const [allDbPlans, setPublishedDbPlans] = useState<PublishedPlan[]>([]);
+  // Chaque enseignant ne voit que ses propres plans (ou ceux de l'enseignant incarné par le Super Admin).
+  const publishedDbPlans = useMemo(
+    () => filterPlansForOwner(allDbPlans, currentTeacher ? { uid: currentTeacher.uid, email: currentTeacher.email, classes: profile.classes, isSuperAdmin: currentTeacher.role === 'super_admin' } : null),
+    [allDbPlans, currentTeacher, profile.classes]
+  );
   const [loadingDbPlans, setLoadingDbPlans] = useState<boolean>(true);
   const [filterBySelectedClass, setFilterBySelectedClass] = useState<boolean>(true);
 
@@ -748,7 +754,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
   // Check if active user is Admin
   const isAdmin = useMemo(() => {
     if (!currentTeacher) return false;
-    return currentTeacher.role === 'super_admin' || isSuperAdminEmail(currentTeacher.email) || currentTeacher.email?.toLowerCase().includes('alimatlea');
+    return currentTeacher.role === 'super_admin' || isSuperAdminEmail(currentTeacher.email);
   }, [currentTeacher]);
 
   // Load teacher list for Admin
@@ -794,10 +800,10 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     const updated: TeacherProfile = {
-      firstName: editFirstName.trim() || 'Mathieu',
-      lastName: editLastName.trim() || 'Abgrall',
-      disciplines: editDisciplines.length > 0 ? editDisciplines : ['Mathématiques'],
-      classes: editClasses.length > 0 ? editClasses : ['3ème A'],
+      firstName: editFirstName.trim(),
+      lastName: editLastName.trim(),
+      disciplines: editDisciplines,
+      classes: editClasses,
     };
     setProfile(updated);
     try {
@@ -1304,7 +1310,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
 
     // Synchronize additions / removals / name changes / passwords with CURRENT published plans ONLY
     try {
-      const activeTeacherName = teacherName.trim() || (profile.fullName && profile.fullName !== 'M. / Mme Enseignant' ? profile.fullName : 'M. Abgrall (Mathématiques)');
+      const activeTeacherName = teacherName.trim() || 'M. / Mme Enseignant';
       const freshPlans = await syncClassRosterWithCurrentPlans(editingClass, modalStudents, activeTeacherName, modalStudentPasswords);
       setPublishedDbPlans(freshPlans);
     } catch (syncErr) {
@@ -1342,7 +1348,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
 
     // Synchronize additions / removals / name changes / passwords with CURRENT published plans ONLY
     try {
-      const activeTeacherName = teacherName.trim() || (profile.fullName && profile.fullName !== 'M. / Mme Enseignant' ? profile.fullName : 'M. Abgrall (Mathématiques)');
+      const activeTeacherName = teacherName.trim() || 'M. / Mme Enseignant';
       const freshPlans = await syncClassRosterWithCurrentPlans(editingClass, modalStudents, activeTeacherName, modalStudentPasswords);
       setPublishedDbPlans(freshPlans);
     } catch (syncErr) {
@@ -1366,7 +1372,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
     if (modalStudents.length > 0) {
       onStudentsParsed(modalStudents, {
         selectedClasses: [currentEditingClass],
-        teacherName: teacherName.trim() || 'M. Abgrall',
+        teacherName: teacherName.trim() || 'M. / Mme Enseignant',
         periodName: periodName.trim() || 'Trimestre 1 - 2026',
       });
     }
@@ -1854,7 +1860,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
     return {
       ...(extraGrid || {}),
       selectedClasses: selectedClasses.length > 0 ? selectedClasses : ['3ème A'],
-      teacherName: teacherName.trim() || 'M. Abgrall',
+      teacherName: teacherName.trim() || 'M. / Mme Enseignant',
       periodName: periodName.trim() || 'Trimestre 1 - 2026',
     };
   };
@@ -3360,7 +3366,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                                 <button
                                   type="button"
                                   onClick={async () => {
-                                    const activeTeacherName = teacherName.trim() || (profile.fullName && profile.fullName !== 'M. / Mme Enseignant' ? profile.fullName : 'M. Abgrall (Mathématiques)');
+                                    const activeTeacherName = teacherName.trim() || 'M. / Mme Enseignant';
                                     await syncClassRosterWithCurrentPlans(p.className, classRosters[p.className], activeTeacherName);
                                     const fresh = await getPublishedPlans();
                                     setPublishedDbPlans(fresh);
@@ -4817,7 +4823,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
               } catch (e) {
                 console.warn('Error persisting rosters on photo apply:', e);
               }
-              const activeTeacherName = teacherName.trim() || (profile.fullName && profile.fullName !== 'M. / Mme Enseignant' ? profile.fullName : 'M. Abgrall (Mathématiques)');
+              const activeTeacherName = teacherName.trim() || 'M. / Mme Enseignant';
               syncClassRosterWithCurrentPlans(editingClass, updatedStudents, activeTeacherName, modalStudentPasswords).catch(console.error);
             }
             setModalNotice({

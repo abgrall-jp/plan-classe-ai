@@ -1,5 +1,6 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import * as pdfjsLib from 'pdfjs-dist';
+import { createWebpAvatar } from './photoLibraryService';
 
 // Configure pdfjs worker
 try {

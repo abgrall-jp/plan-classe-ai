@@ -38,7 +38,10 @@ import {
   duplicatePublishedPlanForClass,
   duplicatePlanToPeriod,
   STANDARD_PERIODS,
-  PublishedPlan
+  PublishedPlan,
+  enrichPlacementsWithPhotos,
+  filterPlansForOwner,
+  getActivePlanOwner
 } from '../services/planSharingService';
 import {
   getLocalTeacherAccount,
@@ -47,7 +50,7 @@ import {
 import { ObstaclePickerModal } from './ObstaclePickerModal';
 import { PRESET_OBSTACLES } from '../services/obstacleService';
 import { StudentPhotoModal, PhotoModalData } from './StudentPhotoModal';
-import { saveStudentPhoto, deleteStudentPhoto } from '../services/photoLibraryService';
+import { saveStudentPhoto, deleteStudentPhoto, getStudentPhoto } from '../services/photoLibraryService';
 
 
 interface ClassroomPlannerProps {
@@ -244,13 +247,18 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
   };
 
   // Publishing & Cloud Sync state
-  const [teacherName, setTeacherName] = useState(plan.teacherName || 'M. Abgrall');
+  const [teacherName, setTeacherName] = useState(plan.teacherName || '');
   const [periodName, setPeriodName] = useState(plan.periodName || 'Trimestre 1 - 2026');
   const [selectedPublishPeriods, setSelectedPublishPeriods] = useState<string[]>(['Trimestre 1 - 2026']);
   const [allowSelfPlacement, setAllowSelfPlacement] = useState(true);
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
   const [publishSuccessMsg, setPublishSuccessMsg] = useState<string | null>(null);
-  const [publishedPlansList, setPublishedPlansList] = useState<PublishedPlan[]>([]);
+  const [allPublishedPlans, setPublishedPlansList] = useState<PublishedPlan[]>([]);
+  // Chaque enseignant ne voit que ses propres plans.
+  const publishedPlansList = React.useMemo(
+    () => filterPlansForOwner(allPublishedPlans, getActivePlanOwner()),
+    [allPublishedPlans]
+  );
   const [isPublishing, setIsPublishing] = useState(false);
   const [selectedPlanToManagePasswords, setSelectedPlanToManagePasswords] = useState<string | null>(null);
   const [selectedPlanToDuplicatePeriod, setSelectedPlanToDuplicatePeriod] = useState<string | null>(null);
@@ -3483,11 +3491,11 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
             onClose={() => setPlannerPhotoModalData(null)}
             onDeletePhoto={async (name) => {
               await deleteStudentPhoto(name);
-              setStudents((prev) => prev.map((s) => (s.name === name ? { ...s, photoUrl: undefined } : s)));
+              setAllStudents((prev) => prev.map((s) => (s.name === name ? { ...s, photoUrl: undefined } : s)));
             }}
             onReplacePhoto={async (name, newPhotoUrl) => {
               await saveStudentPhoto(name, newPhotoUrl, targetClasses[0] || undefined);
-              setStudents((prev) => prev.map((s) => (s.name === name ? { ...s, photoUrl: newPhotoUrl } : s)));
+              setAllStudents((prev) => prev.map((s) => (s.name === name ? { ...s, photoUrl: newPhotoUrl } : s)));
               setPlannerPhotoModalData((prev) => (prev ? { ...prev, photoUrl: newPhotoUrl } : null));
             }}
           />
