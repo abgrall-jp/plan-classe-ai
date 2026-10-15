@@ -1,0 +1,61 @@
+/* Plan de Classe IA - AI Studio Dark Theme Styles */
+
+:root {
+  color-scheme: dark;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+/* Custom modern scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0B0F17;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1E293B;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+.bg-unavailable-pattern {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(156, 163, 175, 0.4),
+    rgba(156, 163, 175, 0.4) 5px,
+    transparent 5px,
+    transparent 10px
+  );
+}
+
+.dark .bg-unavailable-pattern {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(71, 85, 105, 0.4),
+    rgba(71, 85, 105, 0.4) 5px,
+    transparent 5px,
+    transparent 10px
+  );
+}
+
+/* Studio ambient card glow */
+.studio-card {
+  background: rgba(19, 27, 46, 0.75);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.studio-card:hover {
+  border-color: rgba(99, 102, 241, 0.35);
+  box-shadow: 0 10px 30px -10px rgba(99, 102, 241, 0.15);
+}
+

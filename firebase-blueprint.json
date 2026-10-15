@@ -1,0 +1,64 @@
+{
+  "entities": {
+    "publishedPlans": {
+      "title": "Published Seating Plans",
+      "description": "Seating plans published by teachers for students and parents to view or self-place",
+      "type": "object",
+      "properties": {
+        "teacherName": { "type": "string", "description": "Teacher name e.g. M. Abgrall" },
+        "className": { "type": "string", "description": "Class name e.g. 3ème A" },
+        "period": { "type": "string", "description": "Period e.g. Trimestre 1 - 2026" },
+        "allowStudentSelfPlacement": { "type": "boolean", "description": "Whether students can choose their seat" },
+        "isFrozen": { "type": "boolean", "description": "Whether seating plan is locked/frozen by teacher" },
+        "gridDimensions": { "type": "object", "description": "Rows and columns count" },
+        "unavailableCells": { "type": "array", "description": "Cell indices disabled" },
+        "cellObstacles": { "type": "object", "description": "Custom furniture and obstacle markers on unavailable cells (e.g. computer, passage, teacher desk)" },
+        "placements": { "type": "array", "description": "Student placement positions" },
+        "studentPasswords": { "type": "object", "description": "Student passwords dictionary by studentId" },
+        "studentRemarks": { "type": "object", "description": "Teacher observations and remarks per student for this plan period" },
+        "updatedAt": { "type": "string", "description": "Last updated ISO timestamp" }
+      }
+    },
+    "teachers": {
+      "title": "Teacher Profiles",
+      "description": "Teacher accounts and profile details including disciplines and assigned classes",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase auth UID or custom teacher ID" },
+        "email": { "type": "string", "description": "Teacher email address" },
+        "firstName": { "type": "string", "description": "First name" },
+        "lastName": { "type": "string", "description": "Last name" },
+        "disciplines": { "type": "array", "description": "Taught subjects" },
+        "classes": { "type": "array", "description": "Assigned classes list" },
+        "role": { "type": "string", "description": "Role: teacher or super_admin" },
+        "updatedAt": { "type": "string", "description": "Last updated timestamp" }
+      }
+    },
+    "studentPhotos": {
+      "title": "Student Photos",
+      "description": "Lightweight compressed student avatar photos",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string", "description": "Normalized student key" },
+        "name": { "type": "string", "description": "Full student name" },
+        "photoUrl": { "type": "string", "description": "Lightweight WebP data URL" },
+        "className": { "type": "string", "description": "Associated class name" },
+        "updatedAt": { "type": "string", "description": "Last updated timestamp" }
+      }
+    }
+  },
+  "firestore": {
+    "/publishedPlans/{planId}": {
+      "schema": "publishedPlans",
+      "description": "Collection of published seating plans"
+    },
+    "/teachers/{teacherId}": {
+      "schema": "teachers",
+      "description": "Collection of registered teacher profiles"
+    },
+    "/studentPhotos/{photoId}": {
+      "schema": "studentPhotos",
+      "description": "Collection of student photos"
+    }
+  }
+}

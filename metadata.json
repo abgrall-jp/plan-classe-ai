@@ -1,0 +1,9 @@
+{
+  "name": "Plan de Classe IA",
+  "description": "Une application pour générer et optimiser un plan de classe interactif avec Gemini 3.7. Importez ou collez vos listes d'élèves, notes et affinités pour organiser visuellement et automatiquement votre classe.",
+  "requestFramePermissions": [],
+  "prompt": "",
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
