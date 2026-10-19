@@ -2,6 +2,7 @@ import { auth, googleProvider, db, isAdminUser } from '../lib/firebase';
 import {
   signInWithPopup,
   signInWithEmailAndPassword,
+  sendPasswordResetEmail,
   createUserWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
@@ -157,21 +158,6 @@ export const fetchOrCreateTeacherProfile = async (
   return await syncTeacherProfileToFirestore(newProfile);
 };
 
-// Direct fallback login for Super Admin when Google Auth is blocked by network/SSL filters (requires password)
-export const loginAsSuperAdminFallback = async (password: string): Promise<TeacherAccount> => {
-  if (!password || password.trim().length === 0) {
-    throw new Error("Mot de passe requis pour valider et sécuriser l'accès Administrateur Global.");
-  }
-
-  try {
-    const result = await signInWithEmailAndPassword(auth, 'alimatlea@gmail.com', password.trim());
-    return await fetchOrCreateTeacherProfile(result.user);
-  } catch (err: any) {
-    console.warn('Firebase Email Auth for Super Admin failed:', err);
-    throw new Error("Connexion Administrateur refusée");
-  }
-};
-
 // Sign in with Google Popup
 export const loginWithGoogle = async (): Promise<TeacherAccount> => {
   try {
@@ -180,7 +166,7 @@ export const loginWithGoogle = async (): Promise<TeacherAccount> => {
   } catch (err: any) {
     console.error('Google Auth Error:', err);
     if (err.code === 'auth/popup-blocked' || err.code === 'auth/network-request-failed' || err.message?.includes('popup') || err.message?.includes('network') || err.message?.includes('authority')) {
-      throw new Error("La connexion Google est restreinte par le réseau de l'établissement (filtrage SSL/proxy). Utilisez le bouton de connexion secours ci-dessous.");
+      throw new Error("La connexion Google est restreinte par le réseau de l'établissement (filtrage SSL/proxy). Utilisez la connexion par e-mail ci-dessous.");
     }
     throw new Error(err.message || 'Échec de la connexion avec Google');
   }
@@ -222,6 +208,15 @@ export const watchTeacherSession = (onChange: (account: TeacherAccount | null) =
       /* hors ligne : on garde l'état actuel */
     }
   });
+
+/** E-mail de réinitialisation du mot de passe (sert aussi à ajouter un mot de passe à un compte Google). */
+export const sendTeacherPasswordReset = async (email: string): Promise<void> => {
+  try {
+    await sendPasswordResetEmail(auth, email.trim());
+  } catch (err: any) {
+    throw new Error(authErrorMessage(err));
+  }
+};
 
 // Sign in with Email / Password
 export const loginWithEmail = async (email: string, pass: string): Promise<TeacherAccount> => {

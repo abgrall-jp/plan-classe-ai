@@ -209,7 +209,7 @@ const PlanPreviewGridComponent: React.FC<PlanPreviewGridProps> = ({
 
         <div className="flex items-center gap-2.5 text-xs bg-slate-800/90 px-3 py-1.5 rounded-xl border border-slate-700 flex-wrap">
           <span className="font-bold text-amber-400">
-            👥 {effectivePlacements.length} élève(s) {activeRoster && activeRoster.length > 0 ? `(${associationMode === 'replace' ? 'Remplacé' : 'Fusionné'} depuis Étape 1)` : `(${placedStudentsCount} placés)`}
+            👥 {effectivePlacements.length} élève(s) {activeRoster && activeRoster.length > 0 ? `(${associationMode === 'replace' ? 'Remplacé' : 'Fusionné'} depuis Mes classes)` : `(${placedStudentsCount} placés)`}
           </span>
           <label
             className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-md text-xs font-bold cursor-pointer transition-all border border-slate-600 select-none"
@@ -569,6 +569,17 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
   const [isHelpVisible, setIsHelpVisible] = useState(false);
 
   // Teacher Auth Account State
+  // Espace Enseignant en onglets (au lieu d'une seule longue page)
+  type TeacherTab = 'classes' | 'live' | 'plans' | 'create';
+  const [teacherTab, setTeacherTab] = useState<TeacherTab>(() => {
+    try { return (sessionStorage.getItem('plan-classe-teacher-tab') as TeacherTab) || 'classes'; } catch { return 'classes'; }
+  });
+  const goToTab = (tab: TeacherTab) => {
+    setTeacherTab(tab);
+    try { sessionStorage.setItem('plan-classe-teacher-tab', tab); } catch { /* stockage indisponible */ }
+    setTimeout(() => document.getElementById('teacher-tabs')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+  };
+
   const [currentTeacher, setCurrentTeacher] = useState<TeacherAccount | null>(() => {
     return getImpersonatedTeacher() || getLocalTeacherAccount();
   });
@@ -622,7 +633,10 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
   const [newProfileClassInput, setNewProfileClassInput] = useState('');
 
   // Class Selection & Period state
-  const [teacherName, setTeacherName] = useState(profile.lastName ? `M. ${profile.lastName}` : '');
+  // Nom affiché sur les plans : celui du profil de l'enseignant connecté.
+  const profileFullName = [profile.firstName, profile.lastName].filter(Boolean).join(' ').trim();
+  const [teacherName, setTeacherName] = useState(profileFullName);
+  useEffect(() => { setTeacherName(profileFullName); }, [profileFullName]);
   const [periodName, setPeriodName] = useState('Trimestre 1 - 2026');
   const [selectedPublishPeriods, setSelectedPublishPeriods] = useState<string[]>(['Trimestre 1 - 2026']);
   const [step1DuplicatePlanId, setStep1DuplicatePlanId] = useState<string | null>(null);
@@ -831,11 +845,6 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
 
   // Photos de l'enseignant affiché (changement de compte ou consultation par l'administrateur)
   useEffect(() => { refreshCloudPhotos(); }, [currentTeacher?.uid]);
-
-  useEffect(() => {
-    const name = profile.lastName ? `M. ${profile.lastName}`.trim() : '';
-    setTeacherName(name);
-  }, [profile]);
 
   // Open profile editor
   const handleOpenProfileEditor = () => {
@@ -1363,7 +1372,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
 
     // Synchronize additions / removals / name changes / passwords with CURRENT published plans ONLY
     try {
-      const activeTeacherName = teacherName.trim() || (profile.fullName && profile.fullName !== 'M. / Mme Enseignant' ? profile.fullName : 'M. / Mme Enseignant');
+      const activeTeacherName = teacherName.trim() || (profileFullName || 'Enseignant');
       const freshPlans = await syncClassRosterWithCurrentPlans(editingClass, modalStudents, activeTeacherName, modalStudentPasswords);
       setPublishedDbPlans(freshPlans);
     } catch (syncErr) {
@@ -1401,7 +1410,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
 
     // Synchronize additions / removals / name changes / passwords with CURRENT published plans ONLY
     try {
-      const activeTeacherName = teacherName.trim() || (profile.fullName && profile.fullName !== 'M. / Mme Enseignant' ? profile.fullName : 'M. / Mme Enseignant');
+      const activeTeacherName = teacherName.trim() || (profileFullName || 'Enseignant');
       const freshPlans = await syncClassRosterWithCurrentPlans(editingClass, modalStudents, activeTeacherName, modalStudentPasswords);
       setPublishedDbPlans(freshPlans);
     } catch (syncErr) {
@@ -1425,7 +1434,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
     if (modalStudents.length > 0) {
       onStudentsParsed(modalStudents, {
         selectedClasses: [currentEditingClass],
-        teacherName: teacherName.trim() || 'M. / Mme Enseignant',
+        teacherName: teacherName.trim() || profileFullName || 'Enseignant',
         periodName: periodName.trim() || 'Trimestre 1 - 2026',
       });
     }
@@ -1639,7 +1648,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
     try {
       for (const cName of targetClassesList) {
         await savePublishedPlan({
-          teacherName: planToLoad.teacherName || teacherName || 'M. / Mme Enseignant',
+          teacherName: planToLoad.teacherName || teacherName || profileFullName || 'Enseignant',
           className: cName,
           period: planToLoad.period || periodName || 'Période 1',
           allowStudentSelfPlacement: shouldAllowSelfPlacement,
@@ -1680,7 +1689,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
 
     // Scroll smoothly to Step 3
     setTimeout(() => {
-      document.getElementById('step-3-section')?.scrollIntoView({ behavior: 'smooth' });
+      goToTab('create');
     }, 150);
   };
 
@@ -1833,7 +1842,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
           for (const cName of targetClassesToSave) {
             for (const pName of targetPeriodsToSave) {
               await savePublishedPlan({
-                teacherName: teacherName || assignedPlanForStep3.plan.teacherName || 'M. / Mme Enseignant',
+                teacherName: teacherName || assignedPlanForStep3.plan.teacherName || profileFullName || 'Enseignant',
                 className: cName,
                 period: pName,
                 allowStudentSelfPlacement: isSelfPlacementAllowed,
@@ -1912,8 +1921,8 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
   const buildMetaPayload = (extraGrid?: { gridDimensions: { rows: number; cols: number }; unavailableCells: number[] }) => {
     return {
       ...(extraGrid || {}),
-      selectedClasses: selectedClasses.length > 0 ? selectedClasses : ['3ème A'],
-      teacherName: teacherName.trim() || 'M. / Mme Enseignant',
+      selectedClasses,
+      teacherName: teacherName.trim() || profileFullName || 'Enseignant',
       periodName: periodName.trim() || 'Trimestre 1 - 2026',
     };
   };
@@ -2105,6 +2114,28 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
     }));
   };
 
+  // Rien n'est affiché avant la connexion : chaque enseignant ne voit que ses classes et ses plans.
+  if (!currentTeacher) {
+    return (
+      <div className="max-w-4xl mx-auto space-y-6">
+        <TeacherAuthHeader
+          currentTeacher={currentTeacher}
+          onTeacherChange={handleTeacherChange}
+          onOpenEditProfile={handleOpenProfileEditor}
+        />
+        <div className="bg-white dark:bg-slate-800 p-6 sm:p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700 space-y-4">
+          <h2 className="text-xl font-extrabold text-slate-900 dark:text-white">Bienvenue dans l'Espace Enseignant</h2>
+          <p className="text-sm text-slate-600 dark:text-slate-300">Une fois connecté, vous retrouvez vos classes et vos plans sur n'importe quel ordinateur.</p>
+          <ol className="grid sm:grid-cols-3 gap-3 text-xs">
+            <li className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700"><b className="block text-sm mb-1">1. Mes classes</b>Collez ou importez la liste des élèves, ajoutez les photos.</li>
+            <li className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700"><b className="block text-sm mb-1">2. Nouveau plan</b>Dessinez la salle et placez les élèves, à la main ou automatiquement.</li>
+            <li className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-700"><b className="block text-sm mb-1">3. Publication</b>Les élèves et les parents consultent le plan avec leur mot de passe.</li>
+          </ol>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       
@@ -2115,80 +2146,9 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
         onOpenEditProfile={handleOpenProfileEditor}
       />
 
-      {/* SECTION 1: SELECTION & ATTRIBUTION DES CLASSES */}
-      <div className="bg-white dark:bg-slate-800 p-6 sm:p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700 space-y-5">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 text-white font-bold text-lg shadow-sm">
-              1
-            </div>
-            <div>
-              <h2 className="text-xl font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
-                <span>🏫 Choisir la ou les Classe(s) concernée(s)</span>
-              </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Sélectionnez vos classes pour charger un plan existant ou en créer un nouveau.
-              </p>
-            </div>
-          </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={() => {
-                const targetClass = selectedClasses[0] || (displayedClasses.length > 0 ? displayedClasses[0].name : profile.classes[0]) || (allAvailableClassesList.length > 0 ? allAvailableClassesList[0].name : '');
-                if (targetClass) {
-                  handleOpenClassModal(targetClass);
-                } else {
-                  setEditingClass('');
-                  setEditClassNameInput('');
-                  setIsCreatingNewClass(true);
-                  setModalStudents([]);
-                  setModalStudentPasswords({});
-                  setModalActiveTab('list');
-                }
-              }}
-              className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 text-white font-black text-xs sm:text-sm rounded-xl shadow-md hover:shadow-lg transition-all cursor-pointer ring-2 ring-indigo-400/30 active:scale-98"
-              title="Ouvrir le gestionnaire de classe et des photos d'élèves"
-            >
-              <span>👥 Gestionnaire de classes & photos</span>
-            </button>
-            <button
-              type="button"
-              onClick={handleOpenProfileEditor}
-              className="flex items-center gap-2 px-3.5 py-2 bg-indigo-50 dark:bg-indigo-950/80 hover:bg-indigo-100 dark:hover:bg-indigo-900 text-indigo-700 dark:text-indigo-300 font-bold text-xs rounded-xl border border-indigo-200 dark:border-indigo-800 shadow-sm transition-all cursor-pointer"
-            >
-              <span>✏️ Éditer mes infos personnelles</span>
-            </button>
-          </div>
-        </div>
-
-        {/* TEACHER PROFILE SUMMARY CARD */}
-        <div className="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl border border-slate-200/80 dark:border-slate-700/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-base shadow-sm">
-              👨‍🏫
-            </div>
-            <div>
-              <div className="font-extrabold text-slate-900 dark:text-white text-sm">
-                Enseignant : {profile.firstName} {profile.lastName}
-              </div>
-              <div className="flex flex-wrap items-center gap-1.5 mt-1 text-slate-600 dark:text-slate-400 font-semibold">
-                <span>Discipline(s) :</span>
-                {profile.disciplines.map(d => (
-                  <span key={d} className="px-2 py-0.5 bg-indigo-100 dark:bg-indigo-950/80 text-indigo-800 dark:text-indigo-300 rounded-md text-[11px] font-bold">
-                    {d}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
-          <div className="text-slate-500 dark:text-slate-400 text-right">
-            <span className="font-bold text-indigo-600 dark:text-indigo-400">{profile.classes.length}</span> classe(s) attribuée(s)
-          </div>
-        </div>
-
-        {/* GLOBAL PERIOD SELECTOR & MULTI-PERIOD MANAGEMENT BANNER */}
+      {/* PÉRIODE DE TRAVAIL (commune à tous les onglets) */}
+      {/* GLOBAL PERIOD SELECTOR & MULTI-PERIOD MANAGEMENT BANNER */}
         <div className="p-4 bg-indigo-50/70 dark:bg-indigo-950/50 rounded-2xl border border-indigo-200 dark:border-indigo-800 space-y-3 text-xs shadow-2xs">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2">
@@ -2261,6 +2221,72 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                 {pChip}
               </button>
             ))}
+          </div>
+        </div>
+
+
+      {/* ONGLETS DE L'ESPACE ENSEIGNANT */}
+      <nav id="teacher-tabs" className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-1.5 bg-slate-100 dark:bg-slate-900/80 rounded-2xl border border-slate-200 dark:border-slate-700 scroll-mt-24">
+        {([
+          { id: 'classes', icon: '🏫', label: 'Mes classes', hint: 'Listes d\'élèves et photos' },
+          { id: 'live', icon: '🎓', label: 'En classe', hint: 'Plan du jour, en direct' },
+          { id: 'plans', icon: '📂', label: 'Mes plans', hint: 'Plans enregistrés' },
+          { id: 'create', icon: '✏️', label: 'Nouveau plan', hint: 'Créer ou ouvrir un plan' },
+        ] as { id: TeacherTab; icon: string; label: string; hint: string }[]).map(t => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => goToTab(t.id)}
+            aria-current={teacherTab === t.id ? 'page' : undefined}
+            className={`px-3 py-2.5 rounded-xl text-left transition-all cursor-pointer ${
+              teacherTab === t.id
+                ? 'bg-indigo-600 text-white shadow-md'
+                : 'text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-800'
+            }`}
+          >
+            <span className="block text-sm font-extrabold">{t.icon} {t.label}</span>
+            <span className={`block text-[11px] font-medium ${teacherTab === t.id ? 'text-indigo-100' : 'text-slate-500 dark:text-slate-400'}`}>{t.hint}</span>
+          </button>
+        ))}
+      </nav>
+
+      {/* SECTION 1: SELECTION & ATTRIBUTION DES CLASSES */}
+      {teacherTab === 'classes' && (
+      <div className="bg-white dark:bg-slate-800 p-6 sm:p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700 space-y-5">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div className="flex items-center gap-3">
+            <div>
+              <h2 className="text-xl font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
+                <span>🏫 Mes classes</span>
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Sélectionnez vos classes pour charger un plan existant ou en créer un nouveau.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => {
+                const targetClass = selectedClasses[0] || (displayedClasses.length > 0 ? displayedClasses[0].name : profile.classes[0]) || (allAvailableClassesList.length > 0 ? allAvailableClassesList[0].name : '');
+                if (targetClass) {
+                  handleOpenClassModal(targetClass);
+                } else {
+                  setEditingClass('');
+                  setEditClassNameInput('');
+                  setIsCreatingNewClass(true);
+                  setModalStudents([]);
+                  setModalStudentPasswords({});
+                  setModalActiveTab('list');
+                }
+              }}
+              className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 text-white font-black text-xs sm:text-sm rounded-xl shadow-md hover:shadow-lg transition-all cursor-pointer ring-2 ring-indigo-400/30 active:scale-98"
+              title="Ouvrir le gestionnaire de classe et des photos d'élèves"
+            >
+              <span>👥 Gestionnaire de classes & photos</span>
+            </button>
+
           </div>
         </div>
 
@@ -2548,7 +2574,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                           <div className="flex items-center gap-1 mt-1 text-[10px]">
                             {item.isTeacher && (
                               <span className={`px-1.5 py-0.2 rounded font-semibold ${isSelected ? 'bg-indigo-800 text-indigo-100' : 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200'}`}>
-                                👨‍🏫 Attribuée à mon profil
+                                ✓ Dans mes classes
                               </span>
                             )}
                             {item.isDb && (
@@ -2581,7 +2607,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                             } else {
                               setSelectedPreviewPlanId('');
                             }
-                            document.getElementById('step-2-section')?.scrollIntoView({ behavior: 'smooth' });
+                            goToTab('plans');
                           }}
                           className="text-xs font-black py-1 px-2 rounded-lg border border-emerald-400 dark:border-emerald-700 bg-white dark:bg-slate-800 text-emerald-950 dark:text-emerald-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer max-w-[210px] sm:max-w-[280px] truncate"
                           title="Sélectionnez le plan actif pour les élèves de cette classe dans leur Espace Élève"
@@ -2619,13 +2645,13 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                                 setActiveLiveClass(cls);
                                 setIsLivePlanCollapsed(false);
                                 setTimeout(() => {
-                                  document.getElementById('live-class-plan-section')?.scrollIntoView({ behavior: 'smooth' });
+                                  goToTab('live');
                                 }, 50);
                               }}
                               className="px-2.5 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-extrabold text-[11px] rounded-md transition-all shadow-xs flex items-center gap-1 cursor-pointer shrink-0"
                               title="Afficher et ajuster en direct le plan de cette classe pendant le cours (élèves et photos synchronisés en temps réel)"
                             >
-                              <span>⚡ Plan en direct</span>
+                              <span>🎓 En classe</span>
                             </button>
                             <button
                               type="button"
@@ -2635,10 +2661,10 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                                 if (!selectedClasses.includes(cls)) {
                                   setSelectedClasses([cls]);
                                 }
-                                document.getElementById('step-2-section')?.scrollIntoView({ behavior: 'smooth' });
+                                goToTab('plans');
                               }}
                               className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-[11px] rounded-md transition-all shadow-2xs shrink-0 cursor-pointer"
-                              title="Voir la prévisualisation et modifier à l'Étape 2"
+                              title="Voir et modifier dans Mes plans"
                             >
                               Voir ➔
                             </button>
@@ -2667,13 +2693,13 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                               setActiveLiveClass(cls);
                               setIsLivePlanCollapsed(false);
                               setTimeout(() => {
-                                document.getElementById('live-class-plan-section')?.scrollIntoView({ behavior: 'smooth' });
+                                goToTab('live');
                               }, 50);
                             }}
                             className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-[11px] rounded-md transition-all shadow-xs flex items-center gap-1 cursor-pointer shrink-0"
                             title="Créer et afficher le plan en direct pour cette classe"
                           >
-                            <span>⚡ Créer Plan en direct</span>
+                            <span>🎓 Plan du jour</span>
                           </button>
                         )}
                       </div>
@@ -2750,7 +2776,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                             ))}
                           </select>
                         </div>
-                      ) : (
+                      ) : profile.classes.includes(cls) ? null : (
                         <button
                           type="button"
                           onClick={(e) => {
@@ -2758,9 +2784,9 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                             handleAssignClassToTargetTeacher(cls, currentTeacher?.uid || currentTeacher?.email || '');
                           }}
                           className="px-2.5 py-1.5 bg-purple-100 dark:bg-purple-950/80 hover:bg-purple-200 text-purple-900 dark:text-purple-200 font-bold text-[11px] rounded-xl border border-purple-300 dark:border-purple-800 transition-all"
-                          title="Affecter cette classe à mon profil"
+                          title="Ajouter cette classe à la liste de mes classes"
                         >
-                          🎯 Affecter à mon profil
+                          ➕ Ajouter à mes classes
                         </button>
                       )}
 
@@ -2788,7 +2814,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
               type="text"
               value={newClassInput}
               onChange={(e) => setNewClassInput(e.target.value)}
-              placeholder="+ Ajouter une nouvelle classe à mon profil (ex : 6ème C, Groupe SNT 2)"
+              placeholder="+ Nouvelle classe (ex : 6ème C, Groupe SNT 2)"
               className="flex-1 px-3.5 py-2 text-xs rounded-xl border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
             />
             <button
@@ -2820,12 +2846,12 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
               type="button"
               onClick={() => {
                 setIsLivePlanCollapsed(false);
-                document.getElementById('live-class-plan-section')?.scrollIntoView({ behavior: 'smooth' });
+                goToTab('live');
               }}
               className="px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-extrabold rounded-xl shadow-xs transition-all flex items-center gap-1.5 cursor-pointer"
               title="Gérer le plan en direct de la classe sélectionnée"
             >
-              <span>⚡ Plan en direct ({activeLiveClass || selectedClasses[0]})</span>
+              <span>🎓 En classe : {activeLiveClass || selectedClasses[0]}</span>
             </button>
 
             {isAdmin ? (
@@ -2850,28 +2876,36 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                   Affecter les classes sélectionnées
                 </button>
               </div>
-            ) : (
+            ) : selectedClasses.every(c => profile.classes.includes(c)) ? null : (
               <button
                 type="button"
                 onClick={() => handleBatchAssignClassesToTargetTeacher(selectedClasses, currentTeacher?.uid || currentTeacher?.email || '')}
                 disabled={selectedClasses.length === 0}
                 className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-extrabold rounded-xl shadow-xs transition-all"
               >
-                🎯 Affecter la/les classe(s) à mon profil ({profile.firstName} {profile.lastName})
+                ➕ Ajouter à mes classes
               </button>
             )}
           </div>
         </div>
       </div>
 
+      )}
+
       {/* SECTION PLAN EN DIRECT : GESTION DE CLASSE PENDANT LE COURS */}
-      {selectedClasses.length > 0 && (
+      {teacherTab === 'live' && selectedClasses.length === 0 && (
+        <div className="bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700 text-center space-y-3">
+          <p className="text-sm font-bold text-slate-800 dark:text-slate-100">Choisissez d'abord une classe dans l'onglet « Mes classes ».</p>
+          <button type="button" onClick={() => goToTab('classes')} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl cursor-pointer">🏫 Aller à Mes classes</button>
+        </div>
+      )}
+      {teacherTab === 'live' && selectedClasses.length > 0 && (
         <div id="live-class-plan-section" className="bg-slate-900 rounded-2xl shadow-xl border-2 border-indigo-500/80 p-4 sm:p-6 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
             <div className="flex items-center gap-2.5 flex-wrap">
               <span className="w-3 h-3 rounded-full bg-emerald-400 animate-ping" />
               <h2 className="text-lg font-black text-white flex items-center gap-2">
-                <span>🎓 Plan de Classe en Direct — Période en cours</span>
+                <span>🎓 En classe : plan de la période en cours</span>
               </h2>
               {selectedClasses.length > 1 && (
                 <div className="flex items-center gap-1.5 bg-slate-800 px-2 py-1 rounded-xl border border-slate-700">
@@ -2932,15 +2966,13 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
       )}
 
       {/* SECTION 2: CHARGEMENT D'UN PLAN DEPUIS LA BASE DE DONNÉES */}
+      {teacherTab === 'plans' && (
       <div id="step-2-section" className="bg-white dark:bg-slate-800 p-6 sm:p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700 space-y-5">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500 text-white font-bold text-lg shadow-sm">
-              2
-            </div>
             <div>
               <h2 className="text-xl font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
-                <span>📂 Étape 2 : Choisir & Affecter un Plan de la Base de Données</span>
+                <span>📂 Mes plans enregistrés</span>
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                 Consultez la liste des plans disponibles, affichez leur prévisualisation interne et affectez le plan choisi à votre classe.
@@ -2956,7 +2988,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
               onChange={(e) => setFilterBySelectedClass(e.target.checked)}
               className="rounded text-amber-600 focus:ring-amber-500 h-4 w-4"
             />
-            <span>Filtrer uniquement ({selectedClasses.join(', ')})</span>
+            <span>Seulement {selectedClasses.join(', ') || 'mes classes'}</span>
           </label>
         </div>
 
@@ -2967,14 +2999,14 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
               <div>
                 <div className="flex items-center gap-2">
                   <span className="px-2.5 py-0.5 bg-indigo-400 text-slate-950 font-black text-xs rounded-md uppercase tracking-wider">
-                    👥 Élèves prêts depuis l'Étape 1
+                    👥 Élèves de la classe
                   </span>
                   <span className="font-extrabold text-white text-sm">
                     Classe(s) sélectionnée(s) : {selectedClasses.join(', ')}
                   </span>
                 </div>
                 <p className="text-xs text-indigo-200 mt-1">
-                  <strong>{activeStudentsForSelectedClasses.length} élève(s)</strong> sont enregistrés pour la/les classe(s) sélectionnée(s) à l'Étape 1.
+                  <strong>{activeStudentsForSelectedClasses.length} élève(s)</strong> sont enregistrés pour {selectedClasses.join(', ')} dans « Mes classes ».
                 </p>
               </div>
 
@@ -2983,11 +3015,11 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                 onClick={() => {
                   setAssignedPlanForStep3(null);
                   setText(activeStudentsForSelectedClasses.map((s, i) => `${i + 1}. ${s.name}`).join('\n'));
-                  document.getElementById('step-3-section')?.scrollIntoView({ behavior: 'smooth' });
+                  goToTab('create');
                 }}
                 className="px-4 py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 font-black rounded-xl text-xs shadow-md transition-all shrink-0 cursor-pointer flex items-center gap-1.5"
               >
-                <span>🎯 Utiliser directement ces {activeStudentsForSelectedClasses.length} élèves → Passer à l'Étape 3</span>
+                <span>🎯 Utiliser directement ces {activeStudentsForSelectedClasses.length} élèves pour un nouveau plan</span>
               </button>
             </div>
 
@@ -3001,7 +3033,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
           </div>
         ) : (
           <div className="p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 rounded-xl text-xs text-amber-900 dark:text-amber-200 flex items-center justify-between gap-2">
-            <span>ℹ️ Aucun élève enregistré dans la liste de la classe <strong>{selectedClasses.join(', ')}</strong>. Vous pouvez cliquer sur l'icône d'édition de la classe à l'Étape 1 pour importer ou coller vos élèves.</span>
+            <span>ℹ️ Aucun élève enregistré dans la liste de la classe <strong>{selectedClasses.join(', ')}</strong>. Ajoutez-les dans l'onglet « Mes classes » avec le bouton « Éditer & Importer ».</span>
           </div>
         )}
 
@@ -3016,7 +3048,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
               <span>ℹ️ Aucun plan enregistré dans la base de données.</span>
             </div>
             <p className="text-amber-700 dark:text-amber-300">
-              Vous pouvez passer à l'Étape 3 ci-dessous pour créer un nouveau plan à partir d'une liste d'élèves ou d'un fichier.
+              Créez-en un dans l'onglet « Nouveau plan », à partir d'une liste d'élèves ou d'un fichier.
             </p>
           </div>
         ) : (
@@ -3066,10 +3098,10 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                         </div>
                         <div>
                           <h4 className="font-extrabold text-sm text-indigo-200">
-                            Aucun plan de la base sélectionné pour ({selectedClasses.join(', ')})
+                            Aucun plan choisi pour {selectedClasses.join(', ') || 'cette classe'}
                           </h4>
                           <p className="text-xs text-slate-300 mt-0.5">
-                            Vous souhaitez affecter et configurer un <strong>nouveau plan de classe</strong> pour la classe sélectionnée ? Cliquez sur le bouton ci-dessous pour passer directement à l'Étape 3.
+                            Vous souhaitez affecter et configurer un <strong>nouveau plan de classe</strong> pour la classe sélectionnée ? Cliquez sur le bouton ci-dessous.
                           </p>
                         </div>
                       </div>
@@ -3077,11 +3109,11 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                         type="button"
                         onClick={() => {
                           setAssignedPlanForStep3(null);
-                          document.getElementById('step-3-section')?.scrollIntoView({ behavior: 'smooth' });
+                          goToTab('create');
                         }}
                         className="w-full sm:w-auto px-5 py-2.5 bg-indigo-500 hover:bg-indigo-400 text-white font-extrabold rounded-xl text-xs shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
                       >
-                        <span>🎯 Affecter un nouveau plan à ({selectedClasses.join(', ')}) → Passer à l'Étape 3</span>
+                        <span>✏️ Créer un nouveau plan{selectedClasses.length ? ` pour ${selectedClasses.join(', ')}` : ''}</span>
                       </button>
                     </div>
                   )}
@@ -3419,7 +3451,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                                 <button
                                   type="button"
                                   onClick={async () => {
-                                    const activeTeacherName = teacherName.trim() || (profile.fullName && profile.fullName !== 'M. / Mme Enseignant' ? profile.fullName : 'M. Abgrall (Mathématiques)');
+                                    const activeTeacherName = teacherName.trim() || (profileFullName || 'Enseignant');
                                     await syncClassRosterWithCurrentPlans(p.className, classRosters[p.className], activeTeacherName);
                                     const fresh = await getPublishedPlans();
                                     setPublishedDbPlans(fresh);
@@ -3660,7 +3692,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                         onClick={() => handleAssignDbPlanToClassesAndLoad(p, targetClassesForThisPlan)}
                         className="w-full py-2.5 px-4 bg-amber-600 hover:bg-amber-700 text-white font-extrabold rounded-xl text-xs shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
                       >
-                        <span>🎯 Affecter & Charger ce Plan pour ({targetClassesForThisPlan.join(', ')}) → Aller à l'Étape 3</span>
+                        <span>✏️ Ouvrir ce plan pour {targetClassesForThisPlan.join(', ')}</span>
                       </button>
                     </div>
                   </div>
@@ -3671,18 +3703,18 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
         )}
       </div>
 
+      )}
+
       {/* SECTION 3: VERIFICATION, DISPOSITION ET VALIDATION DU PLAN */}
+      {teacherTab === 'create' && (
       <div id="step-3-section" className="bg-white dark:bg-slate-800 p-6 sm:p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700 space-y-6">
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600 text-white font-bold text-lg shadow-sm">
-            3
-          </div>
           <div>
             <h2 className="text-xl font-extrabold text-slate-900 dark:text-white">
-              📝 Étape 3 : Vérification, Disposition & Validation du Plan
+              ✏️ Nouveau plan ou plan existant
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              Vérifiez la liste des élèves, contrôlez leur disposition et validez l'étape pour accéder à l'éditeur interactif.
+              Vérifiez la liste des élèves puis ouvrez l'éditeur pour dessiner la salle et placer les élèves.
             </p>
           </div>
         </div>
@@ -3697,7 +3729,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                 </div>
                 <div>
                   <div className="font-extrabold text-white text-base">
-                    Plan d'origine d'Étape 2 affecté à : <span className="underline font-black text-emerald-300">{assignedPlanForStep3.targetClasses.join(', ')}</span>
+                    Plan choisi dans « Mes plans » pour : <span className="underline font-black text-emerald-300">{assignedPlanForStep3.targetClasses.join(', ')}</span>
                   </div>
                   <div className="text-slate-300 font-medium text-xs mt-0.5 flex flex-wrap gap-2">
                     <span>👨‍🏫 Prof : <strong className="text-emerald-200">{assignedPlanForStep3.plan.teacherName}</strong></span>
@@ -3770,7 +3802,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                           for (const cName of targets) {
                             for (const pName of periods) {
                               await savePublishedPlan({
-                                teacherName: teacherName || assignedPlanForStep3.plan.teacherName || 'M. / Mme Enseignant',
+                                teacherName: teacherName || assignedPlanForStep3.plan.teacherName || profileFullName || 'Enseignant',
                                 className: cName,
                                 period: pName,
                                 allowStudentSelfPlacement: true,
@@ -3884,7 +3916,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                   type="text"
                   value={teacherName}
                   onChange={(e) => setTeacherName(e.target.value)}
-                  placeholder="M. Abgrall"
+                  placeholder="Prénom Nom"
                   className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-white font-semibold focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                 />
               </div>
@@ -3971,7 +4003,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="block font-bold text-slate-800 dark:text-slate-200 text-xs">
-                  📋 Liste des Élèves de la classe ({selectedClasses.join(', ')}) :
+                  📋 Élèves{selectedClasses.length ? ` de ${selectedClasses.join(', ')}` : ''} :
                 </label>
                 <span className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400">
                   {text.split('\n').filter(t => t.trim()).length} élève(s) détecté(s)
@@ -3985,7 +4017,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                 disabled={isLoading}
               />
               <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                ℹ️ Vous pouvez librement ajouter, modifier ou corriger des noms dans le champ ci-dessus avant de valider l'étape.
+                ℹ️ Vous pouvez librement ajouter, modifier ou corriger des noms dans le champ ci-dessus avant d'ouvrir l'éditeur.
               </p>
             </div>
 
@@ -4053,7 +4085,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                     Validation & Chargement de l'Éditeur...
                   </>
                 ) : (
-                  <span>✅ Valider l'Étape 3 & Lancer le Plan de Classe pour ({selectedClasses.join(', ')})</span>
+                  <span>✅ Ouvrir l'éditeur du plan{selectedClasses.length ? ` (${selectedClasses.join(', ')})` : ''}</span>
                 )}
               </button>
             </div>
@@ -4185,7 +4217,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                   }}
                   className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-xl text-xs shadow-md transition-all flex items-center justify-center gap-2"
                 >
-                  <span>🚀 Ouvrir & Affecter ce Plan aux classes ({ (step3TargetClasses.length > 0 ? step3TargetClasses : selectedClasses).join(', ') })</span>
+                  <span>🚀 Ouvrir ce plan{(step3TargetClasses.length > 0 ? step3TargetClasses : selectedClasses).length ? ` pour ${(step3TargetClasses.length > 0 ? step3TargetClasses : selectedClasses).join(', ')}` : ''}</span>
                 </button>
               </div>
             )}
@@ -4195,6 +4227,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
         {error && <p className="mt-4 text-xs font-bold text-center text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/50 p-3 rounded-xl border border-red-200 dark:border-red-800">⚠️ {error}</p>}
 
       </div>
+      )}
 
       {/* CLASS EDITION & STUDENT IMPORT MODAL */}
       {editingClass && (
@@ -4876,7 +4909,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
               } catch (e) {
                 console.warn('Error persisting rosters on photo apply:', e);
               }
-              const activeTeacherName = teacherName.trim() || (profile.fullName && profile.fullName !== 'M. / Mme Enseignant' ? profile.fullName : 'M. Abgrall (Mathématiques)');
+              const activeTeacherName = teacherName.trim() || (profileFullName || 'Enseignant');
               syncClassRosterWithCurrentPlans(editingClass, updatedStudents, activeTeacherName, modalStudentPasswords).catch(console.error);
             }
             setModalNotice({

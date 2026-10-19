@@ -9,8 +9,10 @@ import {
   setImpersonatedTeacher,
   getImpersonatedTeacher,
   isSuperAdminEmail,
-  loginAsSuperAdminFallback
+  sendTeacherPasswordReset
 } from '../services/teacherAuthService';
+import AiCreditsButton from './AiCreditsButton';
+import BillingAdminPanel from './BillingAdminPanel';
 
 interface TeacherAuthHeaderProps {
   currentTeacher: TeacherAccount | null;
@@ -36,10 +38,12 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
   const [regEmail, setRegEmail] = useState('');
   const [regPassword, setRegPassword] = useState('');
   const [regDiscipline, setRegDiscipline] = useState('Mathématiques');
-  const [regClass, setRegClass] = useState('3ème A');
+  const [regClass, setRegClass] = useState('');
 
   const [isLoading, setIsLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [showBillingAdmin, setShowBillingAdmin] = useState(false);
 
   // Super Admin state
   const [allTeachers, setAllTeachers] = useState<TeacherAccount[]>([]);
@@ -68,28 +72,19 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
     }
   };
 
-  const handleSuperAdminFallback = async (providedPassword?: string) => {
-    let passToUse = providedPassword || (emailInput === 'alimatlea@gmail.com' ? passwordInput : '');
-    if (!passToUse) {
-      setAuthTab('login');
-      setEmailInput('alimatlea@gmail.com');
-      const inputPass = window.prompt("🔒 Sécurité - Connexion Secours Administrateur (alimatlea@gmail.com)\n\nVeuillez saisir le mot de passe de votre compte pour sécuriser l'accès :");
-      if (!inputPass) {
-        setAuthError("Saisie du mot de passe annulée. Le mot de passe est requis pour sécuriser l'accès Administrateur.");
-        return;
-      }
-      passToUse = inputPass;
-      setPasswordInput(inputPass);
-    }
-
-    setIsLoading(true);
+  const handlePasswordReset = async () => {
     setAuthError(null);
+    setInfoMessage(null);
+    if (!emailInput.trim()) {
+      setAuthError("Saisissez d'abord votre adresse e-mail, puis cliquez à nouveau sur « Mot de passe oublié ? ».");
+      return;
+    }
+    setIsLoading(true);
     try {
-      const account = await loginAsSuperAdminFallback(passToUse);
-      onTeacherChange(account);
-      setShowAuthModal(false);
+      await sendTeacherPasswordReset(emailInput);
+      setInfoMessage(`Un e-mail pour choisir un nouveau mot de passe a été envoyé à ${emailInput.trim()}. Pensez à regarder dans les indésirables.`);
     } catch (err: any) {
-      setAuthError(err.message || 'Erreur lors de la connexion secours.');
+      setAuthError(err.message);
     } finally {
       setIsLoading(false);
     }
@@ -306,6 +301,15 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
                 <span>👥 Gérer les profils ({allTeachers.length})</span>
               </button>
 
+              <button
+                type="button"
+                onClick={() => setShowBillingAdmin(true)}
+                className="px-3 py-2 bg-white/90 hover:bg-white text-amber-950 font-black text-xs rounded-xl shadow-md transition-all whitespace-nowrap"
+                title="Réglages des crédits IA et soldes des enseignants"
+              >
+                🪙 Crédits IA
+              </button>
+
               {impersonatedTarget && (
                 <button
                   type="button"
@@ -346,7 +350,7 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
             </div>
             <div>
               <div className="font-extrabold text-slate-900 dark:text-white text-sm flex items-center gap-2">
-                <span>Compte Enseignant : M. {activeViewTeacher.lastName} ({activeViewTeacher.firstName})</span>
+                <span>{[activeViewTeacher.firstName, activeViewTeacher.lastName].filter(Boolean).join(' ') || activeViewTeacher.email}</span>
                 {activeViewTeacher.role === 'super_admin' && (
                   <span className="bg-amber-100 text-amber-800 dark:bg-amber-900/80 dark:text-amber-200 font-bold text-[10px] px-2 py-0.5 rounded-md border border-amber-300 dark:border-amber-700">
                     👑 Admin Global
@@ -354,7 +358,7 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
                 )}
               </div>
               <div className="text-slate-500 dark:text-slate-400 mt-0.5">
-                E-mail : <span className="font-semibold text-slate-700 dark:text-slate-300">{activeViewTeacher.email}</span> • Matière(s) : <span className="font-semibold">{activeViewTeacher.disciplines.join(', ')}</span>
+                <span className="font-semibold text-slate-700 dark:text-slate-300">{activeViewTeacher.email}</span>{activeViewTeacher.disciplines?.length ? <> • {activeViewTeacher.disciplines.join(', ')}</> : null}
               </div>
             </div>
           </div>
@@ -375,9 +379,10 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
         )}
 
         {/* Header Action Buttons */}
-        <div className="flex items-center gap-2 self-end sm:self-center">
+        <div className="flex flex-wrap items-center gap-2 self-end sm:self-center">
           {activeViewTeacher ? (
             <>
+              <AiCreditsButton />
               <button
                 type="button"
                 onClick={onOpenEditProfile}
@@ -434,10 +439,10 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
               <span className="text-base leading-none mt-0.5">🌐</span>
               <div className="space-y-0.5">
                 <div className="font-extrabold text-indigo-950 dark:text-indigo-100">
-                  Accès restreint par le réseau (Filtrage SSL / Proxy) ?
+                  Google ne s'ouvre pas sur le réseau de l'établissement ?
                 </div>
                 <div className="text-slate-600 dark:text-slate-300 font-medium">
-                  Si la vérification Google est inactive sur le réseau de votre établissement, saisissez directement votre <strong>e-mail</strong> et votre <strong>mot de passe</strong> dans l'onglet <em>Connexion E-mail</em> ci-dessous pour accéder à votre compte.
+                  Utilisez la connexion par <strong>e-mail</strong> ci-dessous. Si vous vous connectez d'habitude avec Google, cliquez sur « Mot de passe oublié ? » une première fois pour choisir un mot de passe.
                 </div>
               </div>
             </div>
@@ -446,17 +451,15 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
             {authError && (
               <div className="p-3 bg-red-50 dark:bg-red-950/80 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800 rounded-xl text-xs font-bold text-center space-y-2">
                 <div>⚠️ {authError}</div>
-                <button
-                  type="button"
-                  onClick={() => handleSuperAdminFallback()}
-                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-extrabold text-xs rounded-lg shadow-sm transition-all"
-                >
-                  🔒 ⚡ Saisir le mot de passe Admin (alimatlea@gmail.com)
-                </button>
+              </div>
+            )}
+            {infoMessage && (
+              <div className="p-3 bg-emerald-50 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-800 rounded-xl text-xs font-bold text-center">
+                ✉️ {infoMessage}
               </div>
             )}
 
-            {/* GOOGLE SIGN IN BUTTON & SECOURS ADMIN BUTTON */}
+            {/* GOOGLE SIGN IN BUTTON */}
             <div className="space-y-2">
               <button
                 type="button"
@@ -471,16 +474,6 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
                   <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
                 </svg>
                 <span>Se connecter avec un compte Google</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleSuperAdminFallback()}
-                disabled={isLoading}
-                className="w-full py-2.5 px-3 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-900 text-amber-950 dark:text-amber-200 font-bold text-[11px] rounded-xl border border-amber-300 dark:border-amber-700 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-xs"
-                title="Saisissez le mot de passe du compte Google pour débloquer l'accès Administrateur"
-              >
-                <span>🔒 ⚡ Connexion Secours Admin Global (avec mot de passe)</span>
               </button>
 
               <div className="flex items-center my-3 text-slate-400">
@@ -525,7 +518,7 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
                     type="email"
                     value={emailInput}
                     onChange={(e) => setEmailInput(e.target.value)}
-                    placeholder="ex: prof@etablissement.fr ou alimatlea@gmail.com"
+                    placeholder="prof@etablissement.fr"
                     className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 dark:bg-slate-900 dark:text-white font-medium focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                     required
                   />
@@ -549,6 +542,14 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
                   className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-extrabold rounded-2xl shadow-md transition-all cursor-pointer"
                 >
                   {isLoading ? 'Connexion en cours...' : 'Se connecter'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePasswordReset}
+                  disabled={isLoading}
+                  className="w-full text-center text-indigo-600 dark:text-indigo-400 hover:underline font-semibold cursor-pointer"
+                >
+                  Mot de passe oublié ?
                 </button>
               </form>
             )}
@@ -638,56 +639,17 @@ export const TeacherAuthHeader: React.FC<TeacherAuthHeaderProps> = ({
                 </button>
               </form>
             )}
+          </div>
+        </div>
+      )}
 
-            {/* QUICK DEMO & ADMIN LOGINS */}
-            <div className="pt-3 border-t border-slate-100 dark:border-slate-700 space-y-2">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-1">
-                <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  ⚡ ACCÈS RAPIDE COMPTES ENSEIGNANTS & ADMIN
-                </span>
-                <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/80 px-2 py-0.5 rounded-md border border-emerald-200 dark:border-emerald-800">
-                  Accès démo & Secours Réseau
-                </span>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                <button
-                  type="button"
-                  onClick={handleSuperAdminFallback}
-                  className="p-2.5 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-900 border border-amber-300 dark:border-amber-700 text-amber-950 dark:text-amber-200 font-bold text-[11px] rounded-xl text-left transition-all shadow-xs"
-                >
-                  <div className="font-extrabold flex items-center gap-1">
-                    <span>👑 JP Abgrall</span>
-                  </div>
-                  <div className="text-[10px] font-semibold text-amber-800 dark:text-amber-300 truncate">Admin Global</div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const acc = await loginWithEmail('m.abgrall@etablissement.fr', 'demo1234');
-                    onTeacherChange(acc);
-                    setShowAuthModal(false);
-                  }}
-                  className="p-2.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900 border border-indigo-200 dark:border-indigo-700 text-indigo-950 dark:text-indigo-200 font-bold text-[11px] rounded-xl text-left transition-all"
-                >
-                  <div className="font-extrabold">👨‍🏫 M. Abgrall</div>
-                  <div className="text-[10px] font-normal text-indigo-700 dark:text-indigo-300 truncate">Maths / SNT (3ème A)</div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const acc = await loginWithEmail('mme.dubois@etablissement.fr', 'demo1234');
-                    onTeacherChange(acc);
-                    setShowAuthModal(false);
-                  }}
-                  className="p-2.5 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/60 dark:hover:bg-emerald-900 border border-emerald-200 dark:border-emerald-700 text-emerald-950 dark:text-emerald-200 font-bold text-[11px] rounded-xl text-left transition-all"
-                >
-                  <div className="font-extrabold">👩‍🏫 Mme Dubois</div>
-                  <div className="text-[10px] font-normal text-emerald-700 dark:text-emerald-300 truncate">Français (4ème B)</div>
-                </button>
-              </div>
-            </div>
+      {/* ADMINISTRATION DES CRÉDITS IA */}
+      {showBillingAdmin && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setShowBillingAdmin(false)}>
+          <div className="bg-[#141414] text-gray-100 rounded-3xl shadow-2xl border border-white/10 max-w-3xl w-full p-6 max-h-[90vh] overflow-y-auto relative" onClick={e => e.stopPropagation()}>
+            <button type="button" onClick={() => setShowBillingAdmin(false)} className="absolute top-4 right-4 text-gray-400 hover:text-white p-2 font-bold" aria-label="Fermer">✕</button>
+            <h2 className="text-lg font-black mb-4">🪙 Crédits IA : réglages et soldes</h2>
+            <BillingAdminPanel />
           </div>
         </div>
       )}
