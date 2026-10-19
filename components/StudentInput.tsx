@@ -2510,7 +2510,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 max-h-80 overflow-y-auto p-2 bg-slate-50/50 dark:bg-slate-900/30 rounded-xl border border-slate-200/60 dark:border-slate-700">
+          <div className="grid grid-cols-1 gap-3 max-h-[36rem] overflow-y-auto overflow-x-hidden p-2 bg-slate-50/50 dark:bg-slate-900/30 rounded-xl border border-slate-200/60 dark:border-slate-700">
             {displayedClasses.length === 0 ? (
               <div className="p-4 text-center text-xs text-slate-500 italic w-full">
                 Aucune classe ne correspond au filtre. Décochez « Uniquement mes classes » pour afficher les autres classes disponibles.
@@ -2537,7 +2537,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                 return (
                   <div
                     key={cls}
-                    className={`p-3.5 rounded-2xl transition-all border flex flex-col lg:flex-row lg:items-center justify-between gap-3 select-none ${
+                    className={`p-3.5 rounded-2xl transition-all border flex flex-col gap-3 select-none min-w-0 ${
                       isSelected
                         ? 'bg-indigo-50/90 dark:bg-indigo-950/80 border-indigo-300 dark:border-indigo-700 shadow-xs ring-2 ring-indigo-400/50'
                         : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-indigo-300'
@@ -2588,9 +2588,9 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                     </div>
 
                     {/* Actions: Published Plans Dropdown Menu, Teacher Assignment Control & Edit */}
-                    <div className="flex flex-wrap items-center gap-2 border-t lg:border-t-0 pt-2 lg:pt-0 border-slate-200 dark:border-slate-700">
+                    <div className="flex flex-wrap items-center gap-2 w-full min-w-0 border-t pt-2 border-slate-200 dark:border-slate-700">
                       {/* Dropdown Selector for Published Class Plans */}
-                      <div className="flex items-center gap-1.5 bg-emerald-50 dark:bg-emerald-950/60 p-1.5 rounded-xl border border-emerald-300 dark:border-emerald-800 shadow-2xs">
+                      <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-full bg-emerald-50 dark:bg-emerald-950/60 p-1.5 rounded-xl border border-emerald-300 dark:border-emerald-800 shadow-2xs">
                         <span className="text-xs shrink-0 font-extrabold text-emerald-950 dark:text-emerald-200 pl-1 flex items-center gap-1">
                           <span>🎓 Plan Élève :</span>
                         </span>
@@ -2609,7 +2609,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                             }
                             goToTab('plans');
                           }}
-                          className="text-xs font-black py-1 px-2 rounded-lg border border-emerald-400 dark:border-emerald-700 bg-white dark:bg-slate-800 text-emerald-950 dark:text-emerald-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer max-w-[210px] sm:max-w-[280px] truncate"
+                          className="text-xs font-black py-1 px-2 rounded-lg border border-emerald-400 dark:border-emerald-700 bg-white dark:bg-slate-800 text-emerald-950 dark:text-emerald-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer min-w-0 max-w-full sm:max-w-[18rem] truncate"
                           title="Sélectionnez le plan actif pour les élèves de cette classe dans leur Espace Élève"
                         >
                           {classPlans.length > 0 ? (
@@ -2634,7 +2634,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                           )}
                         </select>
                         {activeStudentPlan && (
-                          <div className="flex items-center gap-1">
+                          <div className="flex flex-wrap items-center gap-1">
                             <button
                               type="button"
                               onClick={(e) => {
@@ -2752,7 +2752,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
 
                       {/* Teacher Profile Assignment UI */}
                       {isAdmin ? (
-                        <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-700/80 p-1 rounded-xl border border-slate-300 dark:border-slate-600">
+                        <div className="flex items-center gap-1 min-w-0 max-w-full bg-slate-100 dark:bg-slate-700/80 p-1 rounded-xl border border-slate-300 dark:border-slate-600">
                           <span className="text-[10px] font-bold text-slate-600 dark:text-slate-300 pl-1">
                             Affecter à :
                           </span>
@@ -2766,7 +2766,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                                 handleAssignClassToTargetTeacher(cls, targetVal);
                               }
                             }}
-                            className="text-[11px] font-bold p-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-white"
+                            className="text-[11px] font-bold p-1 min-w-0 max-w-[14rem] truncate rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-white"
                           >
                             <option value="">-- Choisir Enseignant --</option>
                             {allTeachersList.map(t => (
