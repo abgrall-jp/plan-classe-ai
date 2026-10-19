@@ -1,6 +1,19 @@
 import { normalizeStudentName } from './trombiService';
-import { db } from '../lib/firebase';
-import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch } from 'firebase/firestore';
+import { db, auth, isAdminUser } from '../lib/firebase';
+import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, query, where } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
+import { getImpersonatedTeacher, teacherStorageKey } from './teacherAuthService';
+
+/**
+ * Enseignant propriétaire des photos : celui que l'administrateur consulte, sinon le compte connecté.
+ * Chaque enseignant a sa propre bibliothèque (identifiant du document préfixé par son identifiant),
+ * lisible par lui seul : les élèves voient les photos dans le plan que le serveur leur renvoie.
+ */
+const photoOwnerUid = (): string | null => getImpersonatedTeacher()?.uid || auth.currentUser?.uid || null;
+const cloudDocId = (key: string): string | null => {
+  const uid = photoOwnerUid();
+  return uid ? `${uid}_${key.replace(/[^a-z0-9]/g, '_')}` : null;
+};
 
 const DB_NAME = 'ClassroomSeatingPhotoLibrary';
 const DB_VERSION = 1;
@@ -56,7 +69,7 @@ export const syncPhotosFromLocalStorage = () => {
     };
 
     // 1. Sync from class_rosters_v2 (Teacher Class Manager primary store)
-    const rawRosters = localStorage.getItem('class_rosters_v2');
+    const rawRosters = localStorage.getItem(teacherStorageKey('class_rosters_v2'));
     if (rawRosters) {
       try {
         const rosters: Record<string, any[]> = JSON.parse(rawRosters);
@@ -75,7 +88,7 @@ export const syncPhotosFromLocalStorage = () => {
     }
 
     // 2. Sync from classroom_student_rosters
-    const rawOldRosters = localStorage.getItem('classroom_student_rosters');
+    const rawOldRosters = (null as string | null); // ancien stockage commun à tous les comptes : ignoré
     if (rawOldRosters) {
       try {
         const oldRosters: Record<string, any[]> = JSON.parse(rawOldRosters);
@@ -94,7 +107,7 @@ export const syncPhotosFromLocalStorage = () => {
     }
 
     // 3. Sync from plan_de_classe_published_plans_v3
-    const rawPlans = localStorage.getItem('plan_de_classe_published_plans_v3');
+    const rawPlans = (null as string | null); // ancien stockage commun à tous les comptes : ignoré
     if (rawPlans) {
       try {
         const plans: any[] = JSON.parse(rawPlans);
@@ -160,10 +173,9 @@ const getDb = async (): Promise<IDBDatabase | null> => {
       request.onsuccess = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
         isDbReady = true;
-        // Preload all photos into in-memory cache
-        preloadCacheFromDb(db).then(() => {
-          resolve(db);
-        });
+        // Plus de préchargement : ce stockage est commun à tous les comptes du navigateur.
+        // Les photos affichées viennent de la bibliothèque de l'enseignant connecté.
+        resolve(db);
       };
 
       request.onerror = (err) => {
@@ -217,14 +229,19 @@ if (typeof window !== 'undefined') {
 let cloudPhotosUnsubscribe: (() => void) | null = null;
 
 /**
- * Real-time listener for student photos stored in Cloud Firestore.
- * Automatically loads all photos on any client (teacher, student, parent).
+ * Écoute en temps réel les photos de l'enseignant connecté (aucune photo pour un visiteur, un élève ou un parent).
  */
 export const subscribeToCloudPhotos = (): (() => void) => {
   if (typeof window === 'undefined') return () => {};
-  if (cloudPhotosUnsubscribe) return cloudPhotosUnsubscribe;
+  cloudPhotosUnsubscribe?.();
+  cloudPhotosUnsubscribe = null;
+  const uid = photoOwnerUid();
+  const user = auth.currentUser;
+  if (!uid || !user?.email) return () => {};
   try {
-    const colRef = collection(db, CLOUD_COLLECTION_NAME);
+    const colRef = isAdminUser(user) && !getImpersonatedTeacher()
+      ? query(collection(db, CLOUD_COLLECTION_NAME), where('teacherId', '==', user.uid))
+      : query(collection(db, CLOUD_COLLECTION_NAME), where('teacherId', '==', uid));
     cloudPhotosUnsubscribe = onSnapshot(
       colRef,
       (snapshot) => {
@@ -253,9 +270,16 @@ export const subscribeToCloudPhotos = (): (() => void) => {
   }
 };
 
-// Start cloud photo sync immediately in browser
-if (typeof window !== 'undefined') {
+/** Relance l'écoute des photos quand l'enseignant change (connexion, déconnexion, consultation par l'administrateur). */
+export const refreshCloudPhotos = () => {
+  photoCache.clear();
+  syncPhotosFromLocalStorage();
   subscribeToCloudPhotos();
+  notifyListeners();
+};
+
+if (typeof window !== 'undefined') {
+  onAuthStateChanged(auth, () => refreshCloudPhotos());
 }
 
 /**
@@ -506,9 +530,11 @@ export const saveStudentPhoto = async (
 
   // Persist to Cloud Firestore so all students and online browsers have instant access
   try {
-    const docKey = key.replace(/[^a-z0-9]/g, '_');
+    const docKey = cloudDocId(key);
+    if (!docKey) return compressedWebp;
     const docRef = doc(db, CLOUD_COLLECTION_NAME, docKey);
     await setDoc(docRef, {
+      teacherId: photoOwnerUid(),
       key,
       name: name.trim(),
       photoUrl: compressedWebp,
@@ -583,7 +609,7 @@ export const getStudentPhoto = (
   // 6. Dynamic fallback: Scan class_rosters_v2 in localStorage
   if (typeof window !== 'undefined' && key) {
     try {
-      const rawRosters = localStorage.getItem('class_rosters_v2');
+      const rawRosters = localStorage.getItem(teacherStorageKey('class_rosters_v2'));
       if (rawRosters) {
         const rosters: Record<string, any[]> = JSON.parse(rawRosters);
         const tokens = cleanName.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
@@ -645,8 +671,8 @@ export const deleteStudentPhoto = async (name: string): Promise<void> => {
 
   // Delete from Cloud Firestore
   try {
-    const docKey = key.replace(/[^a-z0-9]/g, '_');
-    await deleteDoc(doc(db, CLOUD_COLLECTION_NAME, docKey));
+    const docKey = cloudDocId(key);
+    if (docKey) await deleteDoc(doc(db, CLOUD_COLLECTION_NAME, docKey));
   } catch (err) {
     console.warn('Failed to delete photo from Cloud Firestore:', err);
   }
@@ -710,15 +736,15 @@ export const registerPhotosBatch = async (
 
   // Persist batch to Cloud Firestore using writeBatch to avoid write queue exhaustion
   try {
-    if (compressedEntries.length > 0) {
+    if (compressedEntries.length > 0 && photoOwnerUid()) {
       const CHUNK_SIZE = 200;
       for (let i = 0; i < compressedEntries.length; i += CHUNK_SIZE) {
         const chunk = compressedEntries.slice(i, i + CHUNK_SIZE);
         const batch = writeBatch(db);
         chunk.forEach((rec) => {
-          const docKey = rec.key.replace(/[^a-z0-9]/g, '_');
-          const docRef = doc(db, CLOUD_COLLECTION_NAME, docKey);
+          const docRef = doc(db, CLOUD_COLLECTION_NAME, cloudDocId(rec.key)!);
           batch.set(docRef, {
+            teacherId: photoOwnerUid(),
             key: rec.key,
             name: rec.name,
             photoUrl: rec.photoUrl,

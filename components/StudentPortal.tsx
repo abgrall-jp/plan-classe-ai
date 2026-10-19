@@ -1,19 +1,22 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { StudentPlacement } from '../types';
+import { deduplicatePlacements, getStudentRemarks } from '../services/planSharingService';
 import {
-  PublishedPlan,
-  subscribeToPublishedPlans,
-  updateStudentSeatInPlan,
-  verifyStudentPassword,
-  updateStudentPassword,
-  deduplicatePlacements,
-  getStudentRemarks
-} from '../services/planSharingService';
+  Directory,
+  PortalSession,
+  PortalStudent,
+  fetchDirectory,
+  fetchPlanStudents,
+  loadPortalSession,
+  portalLogin,
+  portalSeat,
+  savePortalSession,
+  usePortalPlan,
+} from '../services/portalService';
 import { UserIcon } from './icons/UserIcon';
 import { GridIcon } from './icons/GridIcon';
 import { useSeatingColors, getSeatBorderStyle } from '../services/seatingColorService';
 import { StudentPhotoModal, PhotoModalData } from './StudentPhotoModal';
-import { getStudentPhoto, subscribeToPhotoLibrary, syncPhotosFromLocalStorage, registerPhotosBatch } from '../services/photoLibraryService';
 import { PlanZoomPanContainer } from './PlanZoomPanContainer';
 import { StudentRemarksViewModal } from './StudentRemarksViewModal';
 import { RgpdLogo } from './RgpdLogo';
@@ -23,11 +26,20 @@ interface StudentPortalProps {
   onBackToHome: () => void;
 }
 
+// Dans l'espace élève, seules les photos enregistrées dans le plan par l'enseignant s'affichent.
+const getStudentPhoto = (_name?: string, photoUrl?: string): string | undefined =>
+  photoUrl && photoUrl.trim() ? photoUrl : undefined;
+
+const splitClasses = (className: string) => className.split(',').map(c => c.trim()).filter(Boolean);
+const sameText = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
 export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) => {
   const { colors } = useSeatingColors();
-  const [plans, setPlans] = useState<PublishedPlan[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [, setPhotoVersion] = useState<number>(0);
+  const [session, setSession] = useState<PortalSession | null>(() => loadPortalSession('student'));
+  const [directory, setDirectory] = useState<Directory | null>(null);
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
+  const [planStudents, setPlanStudents] = useState<PortalStudent[]>([]);
+  const [busy, setBusy] = useState(false);
 
   // Photo modal state
   const [portalPhotoModalData, setPortalPhotoModalData] = useState<PhotoModalData | null>(null);
@@ -42,14 +54,13 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
   } | null>(null);
 
   // Selection state
-  const [selectedTeacher, setSelectedTeacher] = useState<string>('');
-  const [selectedClass, setSelectedClass] = useState<string>('');
-  const [selectedPlanId, setSelectedPlanId] = useState<string>('');
+  const [selectedTeacher, setSelectedTeacher] = useState<string>(session?.teacherId || '');
+  const [selectedClass, setSelectedClass] = useState<string>(session?.className || '');
+  const [selectedPlanId, setSelectedPlanId] = useState<string>(session?.planId || '');
   const [selectedStudentId, setSelectedStudentId] = useState<number | null>(null);
   const [hoveredCellIndex, setHoveredCellIndex] = useState<number | null>(null);
 
-  // Auth / Password state
-  const [authStudentId, setAuthStudentId] = useState<number | null>(null);
+  // Password state
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [showPasswordChangeModal, setShowPasswordChangeModal] = useState<boolean>(false);
@@ -58,83 +69,61 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
 
   const [notification, setNotification] = useState<string | null>(null);
 
-  // Initial sync & subscribe to photo changes in IndexedDB / cache
+  const showToast = (msg: string) => {
+    setNotification(msg);
+    setTimeout(() => setNotification(null), 3500);
+  };
+
+  const updateSession = (s: PortalSession | null) => {
+    savePortalSession('student', s);
+    setSession(s);
+  };
+
+  const logout = () => {
+    updateSession(null);
+    setSelectedStudentId(null);
+    setPasswordInput('');
+    setShowPasswordChangeModal(false);
+  };
+
+  const { plan: activePlan, error: planError, refresh } = usePortalPlan(session, () => {
+    logout();
+    showToast('Ta connexion a expiré : choisis ton nom et reconnecte-toi.');
+  });
+
+  // Annuaire des enseignants et des classes (sans aucun nom d'élève)
   useEffect(() => {
-    syncPhotosFromLocalStorage();
-    const unsub = subscribeToPhotoLibrary(() => {
-      setPhotoVersion((v) => v + 1);
-    });
-    return () => unsub();
+    let alive = true;
+    const load = () => fetchDirectory()
+      .then(d => { if (alive) { setDirectory(d); setDirectoryError(null); } })
+      .catch(e => { if (alive) setDirectoryError(e.message); });
+    load();
+    const timer = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(timer); };
   }, []);
 
-  // Subscribe to real-time Firestore updates
-  useEffect(() => {
-    setLoading(true);
-    const unsubscribe = subscribeToPublishedPlans((freshPlans) => {
-      syncPhotosFromLocalStorage();
-
-      // Collect and register all photos from incoming plans into the photo cache
-      const photosToRegister: Array<{ name: string; photoUrl: string; className?: string }> = [];
-      freshPlans.forEach(plan => {
-        if (Array.isArray(plan.placements)) {
-          plan.placements.forEach(p => {
-            if (p && p.name && p.photoUrl && typeof p.photoUrl === 'string' && p.photoUrl.trim()) {
-              photosToRegister.push({
-                name: p.name,
-                photoUrl: p.photoUrl,
-                className: plan.className,
-              });
-            }
-          });
-        }
-      });
-
-      if (photosToRegister.length > 0) {
-        registerPhotosBatch(photosToRegister).catch(console.warn);
-      }
-
-      setPlans(freshPlans);
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // Filter list of unique teachers
-  const teachers = useMemo(() => {
-    const list = Array.from(new Set(plans.map(p => p.teacherName.trim()))).filter(Boolean);
-    return list.sort();
-  }, [plans]);
+  const loading = !directory && !directoryError;
+  const teachers = directory?.teachers || [];
 
   // Classes for selected teacher
   const classesForTeacher = useMemo(() => {
-    if (!selectedTeacher) return [];
+    if (!selectedTeacher || !directory) return [];
     const set = new Set<string>();
-    plans
-      .filter(p => p.teacherName.trim().toLowerCase() === selectedTeacher.trim().toLowerCase())
-      .forEach(p => {
-        if (p.className) {
-          p.className.split(',').forEach(c => {
-            const trimmed = c.trim();
-            if (trimmed) set.add(trimmed);
-          });
-        }
-      });
-    return Array.from(set).sort();
-  }, [plans, selectedTeacher]);
+    directory.plans.filter(p => p.teacherId === selectedTeacher).forEach(p => splitClasses(p.className).forEach(c => set.add(c)));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'fr'));
+  }, [directory, selectedTeacher]);
 
-  // Plans available for teacher & class
+  // Plans available for teacher & class (périodes en cours d'abord, puis les plus récentes)
   const availablePlans = useMemo(() => {
-    if (!selectedTeacher || !selectedClass) return [];
-    return plans.filter(p => {
-      const teacherMatch = p.teacherName.trim().toLowerCase() === selectedTeacher.trim().toLowerCase();
-      const classList = p.className.split(',').map(c => c.trim().toLowerCase());
-      const classMatch = classList.includes(selectedClass.trim().toLowerCase()) || p.className.trim().toLowerCase() === selectedClass.trim().toLowerCase();
-      return teacherMatch && classMatch;
-    });
-  }, [plans, selectedTeacher, selectedClass]);
+    if (!selectedTeacher || !selectedClass || !directory) return [];
+    return directory.plans
+      .filter(p => p.teacherId === selectedTeacher && splitClasses(p.className).some(c => sameText(c, selectedClass)))
+      .sort((a, b) => Number(a.isPast) - Number(b.isPast) || b.updatedAt.localeCompare(a.updatedAt));
+  }, [directory, selectedTeacher, selectedClass]);
 
   // Auto-select available plan when available
   useEffect(() => {
+    if (!directory) return;
     if (availablePlans.length > 0) {
       if (!selectedPlanId || !availablePlans.some(p => p.id === selectedPlanId)) {
         setSelectedPlanId(availablePlans[0].id);
@@ -142,102 +131,123 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
     } else {
       setSelectedPlanId('');
     }
-  }, [availablePlans, selectedPlanId]);
+  }, [availablePlans, selectedPlanId, directory]);
 
-  // Active selected plan
-  const activePlan = useMemo(() => {
-    return plans.find(p => p.id === selectedPlanId) || null;
-  }, [plans, selectedPlanId]);
+  const selectedPlanMeta = useMemo(
+    () => availablePlans.find(p => p.id === selectedPlanId) || null,
+    [availablePlans, selectedPlanId]
+  );
 
-  // Helper to extract placements array safely and deduplicated
-  const activePlacementsList = useMemo(() => {
-    if (!activePlan) return [];
-    let rawList: any[] = [];
-    if (Array.isArray(activePlan.placements)) {
-      rawList = activePlan.placements;
-    } else if (activePlan.placements && typeof activePlan.placements === 'object') {
-      rawList = Object.values(activePlan.placements);
-    } else if ((activePlan as any).students && Array.isArray((activePlan as any).students)) {
-      rawList = (activePlan as any).students.map((s: any) => ({
-        id: s.id,
-        name: s.name,
-        rollNumber: s.rollNumber || '',
-        location: 'bank'
-      }));
+  // Un élève connecté qui change de période garde sa connexion (même enseignant, même classe).
+  useEffect(() => {
+    if (session && selectedPlanId && selectedPlanId !== session.planId) {
+      updateSession({ ...session, planId: selectedPlanId });
     }
-    return deduplicatePlacements(rawList);
-  }, [activePlan]);
+  }, [selectedPlanId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Student list in current plan (deduplicated & sorted alphabetically)
-  const studentsInPlan = useMemo(() => {
-    return activePlacementsList
-      .slice()
-      .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-  }, [activePlacementsList]);
+  // Noms des élèves de la classe pour l'écran de connexion
+  useEffect(() => {
+    setPlanStudents([]);
+    if (!selectedPlanId || session) return;
+    let alive = true;
+    fetchPlanStudents(selectedPlanId)
+      .then(list => { if (alive) setPlanStudents(list); })
+      .catch(e => { if (alive) showToast(e.message); });
+    return () => { alive = false; };
+  }, [selectedPlanId, session]);
 
-  const showToast = (msg: string) => {
-    setNotification(msg);
-    setTimeout(() => setNotification(null), 3500);
+  const studentsInPlan = useMemo(
+    () => planStudents.map(s => ({ ...s, photoUrl: undefined as string | undefined })),
+    [planStudents]
+  );
+
+  const authStudentId: number | null = session && activePlan ? activePlan.myStudentId : null;
+
+  const openSession = (token: string, student: { id: number; name: string }) => {
+    updateSession({
+      token,
+      planId: selectedPlanId,
+      studentId: student.id,
+      name: student.name,
+      teacherId: selectedTeacher,
+      className: selectedClass,
+    });
+    setShowPasswordChangeModal(false);
+    setPasswordInput('');
+    setNewPasswordInput('');
+    setConfirmPasswordInput('');
+    setPasswordError(null);
   };
 
   // Password submission handler
-  const handleVerifyPassword = (e: React.FormEvent) => {
+  const handleVerifyPassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activePlan || selectedStudentId === null) return;
-
+    if (!selectedPlanId || selectedStudentId === null || busy) return;
     setPasswordError(null);
-    const { valid, requiresPasswordChange } = verifyStudentPassword(
-      activePlan,
-      selectedStudentId,
-      passwordInput
-    );
-
-    if (!valid) {
-      setPasswordError("Mot de passe incorrect. (Par défaut : 0000)");
-      return;
+    setBusy(true);
+    try {
+      const r = await portalLogin({ planId: selectedPlanId, studentId: selectedStudentId, pin: passwordInput, role: 'student' });
+      if (r.needsNewPin) {
+        setShowPasswordChangeModal(true);
+      } else if (r.token && r.student) {
+        openSession(r.token, r.student);
+        showToast('Connexion réussie !');
+      }
+    } catch (err: any) {
+      setPasswordError(err.message);
+    } finally {
+      setBusy(false);
     }
-
-    if (requiresPasswordChange) {
-      setShowPasswordChangeModal(true);
-      return;
-    }
-
-    // Auth Success directly
-    setAuthStudentId(selectedStudentId);
-    showToast("Connexion réussie !");
   };
 
   // Save new custom password
   const handleChangePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activePlan || selectedStudentId === null) return;
+    if (!selectedPlanId || selectedStudentId === null || busy) return;
 
     if (newPasswordInput.trim().length < 4) {
-      setPasswordError("Le nouveau mot de passe doit comporter au moins 4 caractères.");
+      setPasswordError('Le nouveau mot de passe doit comporter au moins 4 caractères.');
       return;
     }
-
     if (newPasswordInput.trim() === '0000') {
-      setPasswordError("Veuillez choisir un mot de passe différent de 0000.");
+      setPasswordError('Choisis un mot de passe différent de 0000.');
       return;
     }
-
     if (newPasswordInput.trim() !== confirmPasswordInput.trim()) {
-      setPasswordError("Les mots de passe ne correspondent pas.");
+      setPasswordError('Les deux mots de passe ne sont pas identiques.');
       return;
     }
 
     setPasswordError(null);
-    const updatedPlan = await updateStudentPassword(
-      activePlan.id,
-      selectedStudentId,
-      newPasswordInput.trim()
-    );
+    setBusy(true);
+    try {
+      const r = await portalLogin({
+        planId: selectedPlanId,
+        studentId: selectedStudentId,
+        pin: passwordInput,
+        newPin: newPasswordInput.trim(),
+        role: 'student',
+      });
+      if (r.token && r.student) {
+        openSession(r.token, r.student);
+        showToast('Mot de passe enregistré. Bienvenue !');
+      }
+    } catch (err: any) {
+      setPasswordError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
-    if (updatedPlan) {
-      setShowPasswordChangeModal(false);
-      setAuthStudentId(selectedStudentId);
-      showToast("Mot de passe mis à jour avec succès ! Bienvenue.");
+  const moveTo = async (location: number | 'bank', okMessage: string) => {
+    if (!session || !activePlan) return;
+    try {
+      await portalSeat(session.token, activePlan.id, location);
+      await refresh();
+      showToast(okMessage);
+    } catch (err: any) {
+      showToast(err.message);
+      refresh();
     }
   };
 
@@ -245,57 +255,46 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
   const handleCellClick = async (cellIndex: number) => {
     if (!activePlan) return;
     if (activePlan.isFrozen) {
-      showToast("🔒 Ce plan de classe est figé par l'enseignant. Vous ne pouvez pas modifier votre place.");
+      showToast("🔒 Ce plan est figé par l'enseignant : ta place ne peut plus changer.");
       return;
     }
     if (!activePlan.allowStudentSelfPlacement) {
-      showToast("Le placement libre est désactivé par l'enseignant.");
+      showToast("Le choix libre des places est désactivé par l'enseignant.");
       return;
     }
     if (authStudentId === null) {
-      showToast("Connectez-vous d'abord en choisissant votre nom et votre mot de passe.");
+      showToast("Connecte-toi d'abord avec ton nom et ton mot de passe.");
       return;
     }
-
     if (activePlan.unavailableCells.includes(cellIndex)) {
-      showToast("Cet emplacement est indisponible dans la salle.");
+      showToast("Cet emplacement n'est pas une place.");
       return;
     }
-
-    const res = await updateStudentSeatInPlan(activePlan.id, authStudentId, cellIndex);
-    if (res.success) {
-      const st = activePlan.placements.find(p => p.id === authStudentId);
-      showToast(`Bravo ${st?.name || ''} ! Ta place a été enregistrée à la table #${cellIndex + 1}.`);
-    } else if (res.message) {
-      showToast(res.message);
-    }
+    await moveTo(cellIndex, `C'est noté ${session?.name || ''} : ta place est la table n° ${cellIndex + 1}.`);
   };
 
   const handleUnseatStudent = async () => {
-    if (!activePlan || authStudentId === null) return;
-    const res = await updateStudentSeatInPlan(activePlan.id, authStudentId, 'bank');
-    if (res.success) {
-      showToast("Ta place a été libérée.");
-    }
+    await moveTo('bank', 'Ta place a été libérée.');
   };
+
+  const activePlacementsList = useMemo(
+    () => (activePlan ? deduplicatePlacements(activePlan.placements || []) : []),
+    [activePlan]
+  );
 
   // Cell occupant map
   const placementMap = useMemo(() => {
     const map = new Map<number, StudentPlacement>();
-    if (activePlan) {
-      activePlacementsList.forEach(p => {
-        if (p && typeof p.location === 'number') {
-          map.set(p.location, p);
-        }
-      });
-    }
+    activePlacementsList.forEach(p => {
+      if (p && typeof p.location === 'number') map.set(p.location, p);
+    });
     return map;
-  }, [activePlan, activePlacementsList]);
+  }, [activePlacementsList]);
 
   const authenticatedStudentObj = useMemo(() => {
-    if (!activePlan || authStudentId === null) return null;
+    if (authStudentId === null) return null;
     return activePlacementsList.find(p => p && p.id === authStudentId) || null;
-  }, [activePlan, authStudentId, activePlacementsList]);
+  }, [authStudentId, activePlacementsList]);
 
   const unplacedStudentsInPortal = useMemo(() => {
     return activePlacementsList.filter(p => p && (p.location === 'bank' || typeof p.location !== 'number'));
@@ -348,14 +347,14 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
                 setSelectedClass('');
                 setSelectedPlanId('');
                 setSelectedStudentId(null);
-                setAuthStudentId(null);
+                if (session) logout();
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0F17] px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
             >
               <option value="">-- Choisir un enseignant --</option>
               {teachers.map((t) => (
-                <option key={t} value={t}>
-                  👨‍🏫 {t}
+                <option key={t.id} value={t.id}>
+                  👨‍🏫 {t.name}
                 </option>
               ))}
             </select>
@@ -373,7 +372,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
                 setSelectedClass(e.target.value);
                 setSelectedPlanId('');
                 setSelectedStudentId(null);
-                setAuthStudentId(null);
+                if (session) logout();
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0F17] px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-emerald-500 focus:outline-none disabled:opacity-50"
             >
@@ -397,7 +396,6 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
               onChange={(e) => {
                 setSelectedPlanId(e.target.value);
                 setSelectedStudentId(null);
-                setAuthStudentId(null);
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0F17] px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-emerald-500 focus:outline-none disabled:opacity-50"
             >
@@ -413,7 +411,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
         </div>
 
         {/* 4. Student Name Selection & Login Prompt */}
-        {activePlan && (
+        {selectedPlanMeta && (
           <div className="border-t border-slate-200 dark:border-slate-800 pt-5 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <label className="text-xs font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
@@ -427,7 +425,9 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
               )}
             </div>
 
-            {authStudentId === null ? (
+            {session && authStudentId === null ? (
+              <p className="text-xs text-slate-500 dark:text-slate-400 p-3">Chargement de ton plan…</p>
+            ) : authStudentId === null ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5 max-h-72 overflow-y-auto p-2.5 bg-slate-50 dark:bg-[#0B0F17] rounded-xl border border-slate-200 dark:border-slate-800">
                 {studentsInPlan.map((st, stIdx) => {
                   const studentPhoto = getStudentPhoto(st.name, st.photoUrl);
@@ -495,7 +495,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
                             name: authenticatedStudentObj?.name || '',
                             photoUrl: authPhoto,
                             rollNumber: authenticatedStudentObj?.rollNumber,
-                            className: activePlan.className,
+                            className: selectedPlanMeta.className,
                             seatInfo: typeof authenticatedStudentObj?.location === 'number' ? `Table #${authenticatedStudentObj.location + 1}` : 'Non assis',
                           });
                         }}
@@ -526,10 +526,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
                     </div>
                   </div>
                   <button
-                    onClick={() => {
-                      setAuthStudentId(null);
-                      setSelectedStudentId(null);
-                    }}
+                    onClick={logout}
                     className="px-3.5 py-1.5 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-lg border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 font-bold text-xs shadow-xs cursor-pointer"
                   >
                     Déconnexion
@@ -577,7 +574,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
                   </div>
 
                   <p className="text-xs text-slate-600 dark:text-slate-300">
-                    Entrez votre mot de passe (par défaut : <code className="font-bold bg-white dark:bg-slate-800 px-1 py-0.5 rounded border border-slate-300 dark:border-slate-700">0000</code>).
+                    Tape ton mot de passe. Pour ta toute première connexion, c'est <code className="font-bold bg-white dark:bg-slate-800 px-1 py-0.5 rounded border border-slate-300 dark:border-slate-700">0000</code> ou celui donné par ton enseignant.
                   </p>
 
                   <div className="flex gap-2">
@@ -591,9 +588,10 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
                     />
                     <button
                       type="submit"
-                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg shadow-sm cursor-pointer"
+                      disabled={busy || !passwordInput}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-lg shadow-sm cursor-pointer"
                     >
-                      Valider
+                      {busy ? '…' : 'Valider'}
                     </button>
                   </div>
 
@@ -611,10 +609,10 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
               <form onSubmit={handleChangePasswordSubmit} className="bg-amber-50 dark:bg-amber-950/60 border-2 border-amber-400 dark:border-amber-700 rounded-xl p-5 space-y-3 max-w-md mx-auto shadow-lg">
                 <div className="text-amber-900 dark:text-amber-100">
                   <h4 className="text-sm font-extrabold flex items-center gap-2">
-                    🔒 Première connexion : Personnalisation du mot de passe
+                    🔒 Première connexion : choisis ton mot de passe
                   </h4>
                   <p className="text-xs mt-1">
-                    Votre mot de passe actuel est la valeur par défaut (<code className="font-bold">0000</code>). Vous devez choisir un mot de passe personnel pour sécuriser votre accès.
+                    Choisis maintenant ton propre mot de passe et retiens-le : il servira pour toutes les périodes de ta classe.
                   </p>
                 </div>
 
@@ -654,7 +652,8 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
 
                 <button
                   type="submit"
-                  className="w-full py-2.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg shadow"
+                  disabled={busy}
+                  className="w-full py-2.5 disabled:opacity-50 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg shadow"
                 >
                   Enregistrer mon nouveau mot de passe
                 </button>
@@ -1126,10 +1125,12 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
             <GridIcon className="h-8 w-8" />
           </div>
           <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">
-            Aucun plan de classe sélectionné
+            {loading ? 'Chargement des classes…' : directoryError ? 'Impossible de charger les classes' : selectedPlanMeta ? 'Connecte-toi pour voir le plan' : 'Choisis ta classe'}
           </h3>
           <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md mx-auto">
-            Veuillez choisir un enseignant, une classe et une période dans les menus ci-dessus.
+            {directoryError || planError || (selectedPlanMeta
+              ? "Clique sur ton nom dans la liste ci-dessus, puis tape ton mot de passe."
+              : "Choisis ton enseignant, ta classe et la période dans les menus ci-dessus.")}
           </p>
         </div>
       )}

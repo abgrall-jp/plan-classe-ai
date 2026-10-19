@@ -1,15 +1,17 @@
 import { StudentPlacement, StudentPeriodRemark, PublishedPlan } from '../types';
 export type { StudentPeriodRemark, PublishedPlan };
-import { db, handleFirestoreError } from '../lib/firebase';
+import { db, auth, authReady, handleFirestoreError, isAdminUser, reportSaveError } from '../lib/firebase';
 import {
   collection,
   doc,
-  setDoc,
   getDocs,
   onSnapshot,
-  deleteDoc,
-  writeBatch
+  query,
+  where,
+  writeBatch,
+  type Query
 } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
 import { getStudentPhoto } from './photoLibraryService';
 import { getImpersonatedTeacher, getLocalTeacherAccount } from './teacherAuthService';
 
@@ -142,222 +144,138 @@ export const cleanForFirestore = <T>(obj: T): T => {
 };
 
 const COLLECTION_NAME = 'publishedPlans';
-const LOCAL_STORAGE_KEY = 'plan_de_classe_published_plans_v3';
+// Mots de passe et remarques des élèves : rangés à part, lisibles seulement par l'enseignant du plan.
+// Les élèves et les parents n'accèdent jamais à la base : le serveur leur renvoie une version filtrée du plan.
+const SECRETS_COLLECTION = 'planSecrets';
 
-// Default initial demo plans for immediate preview
-const INITIAL_DEMO_PLANS: PublishedPlan[] = [
-  {
-    id: 'demo-plan-1',
-    teacherName: 'M. / Mme Enseignant',
-    className: '3ème A',
-    period: 'Période 1 (Septembre - Toussaint)',
-    allowStudentSelfPlacement: true,
-    isFrozen: false,
-    gridDimensions: { rows: 5, cols: 6 },
-    unavailableCells: [0, 5],
-    placements: [
-      { id: 1, name: 'Hugo Dupont', rollNumber: '1', location: 7 },
-      { id: 2, name: 'Emma Martin', rollNumber: '2', location: 8 },
-      { id: 3, name: 'Lucas Bernard', rollNumber: '3', location: 13 },
-      { id: 4, name: 'Chloé Thomas', rollNumber: '4', location: 14 },
-      { id: 5, name: 'Enzo Petit', rollNumber: '5', location: 'bank' },
-      { id: 6, name: 'Manon Robert', rollNumber: '6', location: 'bank' },
-      { id: 7, name: 'Nathan Richard', rollNumber: '7', location: 'bank' },
-    ],
-    studentPasswords: {
-      1: { password: '0000', isDefault: true },
-      2: { password: '0000', isDefault: true },
-      3: { password: '0000', isDefault: true },
-      4: { password: '0000', isDefault: true },
-      5: { password: '0000', isDefault: true },
-      6: { password: '0000', isDefault: true },
-      7: { password: '0000', isDefault: true },
-    },
-    updatedAt: new Date().toISOString(),
-  },
-  {
-    id: 'demo-plan-2',
-    teacherName: 'Mme Dubois (Français)',
-    className: '4ème B',
-    period: 'Trimestre 1 - 2026',
-    allowStudentSelfPlacement: false,
-    isFrozen: true,
-    gridDimensions: { rows: 4, cols: 5 },
-    unavailableCells: [],
-    placements: [
-      { id: 101, name: 'Antoine Moreau', rollNumber: '1', location: 2 },
-      { id: 102, name: 'Léa Laurent', rollNumber: '2', location: 3 },
-      { id: 103, name: 'Gabriel Simon', rollNumber: '3', location: 7 },
-      { id: 104, name: 'Camille Michel', rollNumber: '4', location: 8 },
-      { id: 105, name: 'Sarah Lefebvre', rollNumber: '5', location: 'bank' },
-    ],
-    studentPasswords: {
-      101: { password: '0000', isDefault: true },
-      102: { password: '0000', isDefault: true },
-      103: { password: '0000', isDefault: true },
-      104: { password: '0000', isDefault: true },
-      105: { password: '0000', isDefault: true },
-    },
-    updatedAt: new Date().toISOString(),
-  }
-];
+// Dernière liste connue (mémoire seulement : plus de copie dans le navigateur, partagée entre comptes).
+let lastKnownPlans: PublishedPlan[] = [];
 
-// Helper for local storage backup
-const getLocalPlans = (): PublishedPlan[] => {
-  try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (!raw) {
-      const enrichedDemo = INITIAL_DEMO_PLANS.map(p => ({
-        ...p,
-        placements: enrichPlacementsWithPhotos(deduplicatePlacements(p.placements || []))
-      }));
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(enrichedDemo));
-      return enrichedDemo;
-    }
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed.map(p => ({
-        ...p,
-        placements: enrichPlacementsWithPhotos(deduplicatePlacements(p.placements || []))
-      }));
-    }
-    return INITIAL_DEMO_PLANS.map(p => ({
-      ...p,
-      placements: enrichPlacementsWithPhotos(deduplicatePlacements(p.placements || []))
-    }));
-  } catch {
-    return INITIAL_DEMO_PLANS.map(p => ({
-      ...p,
-      placements: enrichPlacementsWithPhotos(deduplicatePlacements(p.placements || []))
-    }));
-  }
+const getLocalPlans = (): PublishedPlan[] => lastKnownPlans.map(p => ({ ...p }));
+const saveLocalPlans = (plans: PublishedPlan[]) => { lastKnownPlans = plans; };
+
+/** Enseignant dont on lit les plans : celui que l'administrateur consulte, sinon le compte connecté. */
+const plansOwnerUid = (): string | null => {
+  const owner = getActivePlanOwner();
+  return owner?.uid || auth.currentUser?.uid || null;
 };
 
-const saveLocalPlans = (plans: PublishedPlan[]) => {
+/** Requêtes autorisées par les règles : ses propres plans (tous les plans pour l'administrateur sans consultation). */
+const ownerQueries = (): { plans: Query; secrets: Query } | null => {
+  const user = auth.currentUser;
+  if (!user || !user.email) return null;
+  const impersonated = getImpersonatedTeacher();
+  if (isAdminUser(user) && !impersonated) {
+    return { plans: collection(db, COLLECTION_NAME), secrets: collection(db, SECRETS_COLLECTION) };
+  }
+  const uid = plansOwnerUid();
+  if (!uid) return null;
+  return {
+    plans: query(collection(db, COLLECTION_NAME), where('teacherId', '==', uid)),
+    secrets: query(collection(db, SECRETS_COLLECTION), where('teacherId', '==', uid)),
+  };
+};
+
+const preparePlan = (data: PublishedPlan, secret?: any): PublishedPlan => ({
+  ...data,
+  ...(secret?.studentPasswords ? { studentPasswords: secret.studentPasswords } : {}),
+  ...(secret?.studentRemarks ? { studentRemarks: secret.studentRemarks } : {}),
+  placements: enrichPlacementsWithPhotos(deduplicatePlacements(data.placements || [])),
+});
+
+const sortPlans = (plans: PublishedPlan[]) =>
+  plans.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+
+/** Enregistre un plan : la partie affichée dans publishedPlans, mots de passe et remarques dans planSecrets. */
+const writePlan = async (plan: PublishedPlan): Promise<boolean> => {
+  const { studentPasswords, studentRemarks, ...publicPart } = plan;
+  const teacherId = publicPart.teacherId || plansOwnerUid() || undefined;
+  const clean = cleanForFirestore({ ...publicPart, teacherId });
   try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(plans));
+    const batch = writeBatch(db);
+    batch.set(doc(db, COLLECTION_NAME, plan.id), clean);
+    batch.set(doc(db, SECRETS_COLLECTION, plan.id), cleanForFirestore({
+      teacherId,
+      studentPasswords: studentPasswords || {},
+      studentRemarks: studentRemarks || {},
+      updatedAt: plan.updatedAt,
+    }));
+    await batch.commit();
+    const idx = lastKnownPlans.findIndex(p => p.id === plan.id);
+    const stored = { ...plan, teacherId };
+    if (idx >= 0) lastKnownPlans[idx] = stored; else lastKnownPlans.unshift(stored);
+    return true;
   } catch (e) {
-    console.error('LocalStorage save error:', e);
+    reportSaveError(`Plan « ${plan.className} – ${plan.period} » non enregistré`, e);
+    return false;
   }
 };
 
-// Real-time listener for all published plans
+/** Plan à modifier : copie de la dernière version reçue (sans relire toute la base à chaque geste). */
+const findPlan = async (planId: string): Promise<PublishedPlan | null> => {
+  let plan = lastKnownPlans.find(p => p.id === planId);
+  if (!plan) plan = (await getPublishedPlans()).find(p => p.id === planId);
+  return plan ? JSON.parse(JSON.stringify(plan)) : null;
+};
+
+// Real-time listener for the connected teacher's published plans
 export const subscribeToPublishedPlans = (
   onData: (plans: PublishedPlan[]) => void
 ) => {
-  try {
-    const colRef = collection(db, COLLECTION_NAME);
-    return onSnapshot(
-      colRef,
-      (snapshot) => {
-        if (!snapshot.empty) {
-          const plans = snapshot.docs.map(docSnap => {
-            const data = docSnap.data() as PublishedPlan;
-            return {
-              ...data,
-              placements: enrichPlacementsWithPhotos(deduplicatePlacements(data.placements || []))
-            };
-          });
-          plans.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-          saveLocalPlans(plans);
-          onData(plans);
-        } else {
-          onData(getLocalPlans());
-        }
-      },
-      (error) => {
-        handleFirestoreError(error, 'list', COLLECTION_NAME);
-        onData(getLocalPlans());
-      }
-    );
-  } catch (err) {
-    handleFirestoreError(err, 'list', COLLECTION_NAME);
-    onData(getLocalPlans());
-    return () => {};
-  }
+  let unsubPlans: (() => void) | null = null;
+  let unsubSecrets: (() => void) | null = null;
+  let cancelled = false;
+  const stop = () => {
+    unsubPlans?.(); unsubSecrets?.();
+    unsubPlans = unsubSecrets = null;
+  };
+  const start = () => {
+    stop();
+    const q = ownerQueries();
+    if (!q) { lastKnownPlans = []; onData([]); return; }
+    let planDocs: Map<string, PublishedPlan> | null = null;
+    let secretDocs = new Map<string, any>();
+    const emit = () => {
+      if (!planDocs) return;
+      const plans = sortPlans(Array.from(planDocs.values()).map(p => preparePlan(p, secretDocs.get(p.id))));
+      lastKnownPlans = plans;
+      onData(plans);
+    };
+    unsubPlans = onSnapshot(q.plans, snap => {
+      planDocs = new Map(snap.docs.map(d => [d.id, { ...(d.data() as PublishedPlan), id: d.id }]));
+      emit();
+    }, error => {
+      handleFirestoreError(error, 'list', COLLECTION_NAME);
+      onData(getLocalPlans());
+    });
+    unsubSecrets = onSnapshot(q.secrets, snap => {
+      secretDocs = new Map(snap.docs.map(d => [d.id, d.data()]));
+      emit();
+    }, error => handleFirestoreError(error, 'list', SECRETS_COLLECTION));
+  };
+  // Les plans dépendent du compte connecté : on relance l'écoute à chaque connexion ou déconnexion.
+  const unsubAuth = onAuthStateChanged(auth, () => { if (!cancelled) start(); });
+  return () => { cancelled = true; unsubAuth(); stop(); };
 };
 
 export const getPublishedPlans = async (): Promise<PublishedPlan[]> => {
+  await authReady;
+  const q = ownerQueries();
+  if (!q) return [];
   try {
-    const snapshot = await getDocs(collection(db, COLLECTION_NAME));
-    if (!snapshot.empty) {
-      const plans = snapshot.docs.map(docSnap => {
-        const data = docSnap.data() as PublishedPlan;
-        return {
-          ...data,
-          placements: enrichPlacementsWithPhotos(deduplicatePlacements(data.placements || []))
-        };
-      });
-      plans.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-      saveLocalPlans(plans);
-      return plans;
-    }
+    const [planSnap, secretSnap] = await Promise.all([getDocs(q.plans), getDocs(q.secrets)]);
+    const secrets = new Map(secretSnap.docs.map(d => [d.id, d.data()]));
+    const plans = sortPlans(planSnap.docs.map(d => preparePlan({ ...(d.data() as PublishedPlan), id: d.id }, secrets.get(d.id))));
+    lastKnownPlans = plans;
+    return plans;
   } catch (e) {
     handleFirestoreError(e, 'get', COLLECTION_NAME);
   }
   return getLocalPlans();
 };
 
-let hasReconciledPlansThisSession = false;
-
-/**
- * Safely syncs local teacher plans with photos to Firestore if they do not yet exist in Firestore.
- * Strictly guarded to run at most ONCE per browser session and never inside an onSnapshot listener.
- */
-export const reconcileLocalPlansToFirestore = async (): Promise<void> => {
-  if (typeof window === 'undefined') return;
-  if (hasReconciledPlansThisSession) return;
-  hasReconciledPlansThisSession = true;
-
-  try {
-    const activeOwner = getActivePlanOwner();
-    const localPlans = getLocalPlans();
-    if (!Array.isArray(localPlans) || localPlans.length === 0) return;
-
-    // Check remote docs first to avoid unnecessary writes
-    const snapshot = await getDocs(collection(db, COLLECTION_NAME));
-    const remotePlanMap = new Map<string, PublishedPlan>();
-    snapshot.forEach(docSnap => {
-      remotePlanMap.set(docSnap.id, docSnap.data() as PublishedPlan);
-    });
-
-    const batch = writeBatch(db);
-    let count = 0;
-
-    for (const plan of localPlans) {
-      if (!plan || !plan.id) continue;
-      // Skip demo plans and plans not owned by connected teacher
-      if (plan.id.startsWith('demo-')) continue;
-      if (!isPlanOwnedBy(plan, activeOwner)) continue;
-
-      const remote = remotePlanMap.get(plan.id);
-
-      // If remote already exists and has photos, skip
-      const remoteHasPhotos = remote?.placements?.some(p => !!p.photoUrl);
-      if (remote && remoteHasPhotos) continue;
-
-      const enrichedPlacements = enrichPlacementsWithPhotos(plan.placements || []);
-      const localHasPhotos = enrichedPlacements.some(p => !!p.photoUrl);
-      if (!localHasPhotos && remote) continue;
-
-      const enrichedPlan: PublishedPlan = {
-        ...(remote || plan),
-        placements: enrichedPlacements,
-      };
-
-      const docRef = doc(db, COLLECTION_NAME, plan.id);
-      batch.set(docRef, cleanForFirestore(enrichedPlan), { merge: true });
-      count++;
-      if (count >= 100) break;
-    }
-
-    if (count > 0) {
-      await batch.commit();
-    }
-  } catch (err) {
-    console.warn('[Firestore] reconcileLocalPlansToFirestore error:', err);
-  }
-};
+/** Ancienne synchronisation des plans gardés dans le navigateur : inutile depuis que tout est dans la base. */
+export const reconcileLocalPlansToFirestore = async (): Promise<void> => {};
 
 export const STANDARD_PERIODS = [
   'Trimestre 1',
@@ -475,65 +393,34 @@ export const savePublishedPlan = async (
     updatedAt: now,
   };
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, targetId);
-    await setDoc(docRef, cleanForFirestore(newRecord));
-  } catch (e) {
-    console.warn('Firestore save error, saving to local:', e);
-  }
+  await writePlan(newRecord);
 
-  // Always update local storage
-  const local = getLocalPlans();
-  const idx = local.findIndex(p => p.id === targetId);
-  if (idx >= 0) local[idx] = newRecord;
-  else local.unshift(newRecord);
-  saveLocalPlans(local);
 
   return newRecord;
 };
 
 // Toggle plan freeze state (Figer / Dégeler)
 export const toggleFreezePlan = async (planId: string, isFrozen: boolean): Promise<PublishedPlan | null> => {
-  const plans = await getPublishedPlans();
-  const plan = plans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return null;
 
   plan.isFrozen = isFrozen;
   plan.updatedAt = new Date().toISOString();
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore freeze update error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return plan;
 };
 
 // Toggle whether a plan is marked as a past/archived plan (Plan passé vs Plan actuel)
 export const togglePastPlan = async (planId: string, isPast: boolean): Promise<PublishedPlan | null> => {
-  const plans = await getPublishedPlans();
-  const plan = plans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return null;
 
   plan.isPast = isPast;
   plan.updatedAt = new Date().toISOString();
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore toggle past plan error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return plan;
 };
@@ -591,16 +478,7 @@ export const syncClassRosterWithCurrentPlans = async (
         updatedAt: new Date().toISOString(),
       };
 
-      try {
-        const docRef = doc(db, COLLECTION_NAME, newPlanId);
-        await setDoc(docRef, cleanForFirestore(newPlanRecord));
-      } catch (e) {
-        console.warn('Firestore sync auto-create plan error:', e);
-      }
-
-      const local = getLocalPlans();
-      local.unshift(newPlanRecord);
-      saveLocalPlans(local);
+      await writePlan(newPlanRecord);
     }
     return getPublishedPlans();
   }
@@ -712,16 +590,7 @@ export const syncClassRosterWithCurrentPlans = async (
       updatedAt: new Date().toISOString(),
     };
 
-    try {
-      const docRef = doc(db, COLLECTION_NAME, plan.id);
-      await setDoc(docRef, cleanForFirestore(updatedPlanRecord));
-    } catch (e) {
-      console.warn('Firestore sync error, saving local:', e);
-      const local = getLocalPlans();
-      const idx = local.findIndex(p => p.id === plan.id);
-      if (idx >= 0) local[idx] = updatedPlanRecord;
-      saveLocalPlans(local);
-    }
+    await writePlan(updatedPlanRecord);
   }
 
   return getPublishedPlans();
@@ -729,31 +598,20 @@ export const syncClassRosterWithCurrentPlans = async (
 
 // Update the assigned class name of a published plan (Réaffecter / Désaffecter)
 export const reassignPublishedPlanClass = async (planId: string, newClassName: string): Promise<PublishedPlan | null> => {
-  const plans = await getPublishedPlans();
-  const plan = plans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return null;
 
   plan.className = newClassName.trim() || 'Sans classe';
   plan.updatedAt = new Date().toISOString();
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore reassign class error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return plan;
 };
 
 // Duplicate a published plan for another class (Affecter à une autre classe)
 export const duplicatePublishedPlanForClass = async (planId: string, newClassName: string): Promise<PublishedPlan | null> => {
-  const plans = await getPublishedPlans();
-  const originalPlan = plans.find(p => p.id === planId);
+  const originalPlan = await findPlan(planId);
   if (!originalPlan) return null;
 
   const activeOwner = getActivePlanOwner();
@@ -769,54 +627,39 @@ export const duplicatePublishedPlanForClass = async (planId: string, newClassNam
     updatedAt: new Date().toISOString(),
   };
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, newId);
-    await setDoc(docRef, cleanForFirestore(duplicatedPlan));
-  } catch (e) {
-    console.warn('Firestore duplicate plan error:', e);
-    const local = getLocalPlans();
-    local.unshift(duplicatedPlan);
-    saveLocalPlans(local);
-  }
+  await writePlan(duplicatedPlan);
 
   return duplicatedPlan;
 };
 
 export const deletePublishedPlan = async (id: string): Promise<void> => {
   try {
-    await deleteDoc(doc(db, COLLECTION_NAME, id));
+    const batch = writeBatch(db);
+    batch.delete(doc(db, COLLECTION_NAME, id));
+    batch.delete(doc(db, SECRETS_COLLECTION, id));
+    await batch.commit();
   } catch (e) {
-    console.warn('Firestore delete error:', e);
+    reportSaveError('Suppression du plan impossible', e);
+    return;
   }
   const local = getLocalPlans().filter(p => p.id !== id);
   saveLocalPlans(local);
 };
 
 export const updatePlanPeriod = async (planId: string, newPeriod: string): Promise<PublishedPlan | null> => {
-  const plans = await getPublishedPlans();
-  const plan = plans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return null;
 
   plan.period = newPeriod.trim() || 'Période 1';
   plan.updatedAt = new Date().toISOString();
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore update period error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return plan;
 };
 
 export const clearPlanPlacements = async (planId: string): Promise<PublishedPlan | null> => {
-  const plans = await getPublishedPlans();
-  const plan = plans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return null;
 
   plan.placements = plan.placements.map(st => ({
@@ -827,23 +670,13 @@ export const clearPlanPlacements = async (planId: string): Promise<PublishedPlan
   plan.isFrozen = false;
   plan.updatedAt = new Date().toISOString();
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore clear placements error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return plan;
 };
 
 export const fillPlanPlacements = async (planId: string): Promise<PublishedPlan | null> => {
-  const plans = await getPublishedPlans();
-  const plan = plans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return null;
 
   const rows = plan.gridDimensions?.rows || 5;
@@ -869,16 +702,7 @@ export const fillPlanPlacements = async (planId: string): Promise<PublishedPlan 
 
   plan.updatedAt = new Date().toISOString();
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore fill placements error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return plan;
 };
@@ -888,23 +712,13 @@ export const updatePlanGridDimensions = async (
   rows: number,
   cols: number
 ): Promise<PublishedPlan | null> => {
-  const plans = await getPublishedPlans();
-  const plan = plans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return null;
 
   plan.gridDimensions = { rows: Math.max(1, rows), cols: Math.max(1, cols) };
   plan.updatedAt = new Date().toISOString();
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore update grid dimensions error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return plan;
 };
@@ -914,8 +728,7 @@ export const updateStudentSeatInPlan = async (
   studentId: number,
   newLocation: number | 'bank'
 ): Promise<{ success: boolean; plan?: PublishedPlan; message?: string }> => {
-  const currentPlans = await getPublishedPlans();
-  const plan = currentPlans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return { success: false, message: 'Plan introuvable' };
 
   if (plan.isFrozen) {
@@ -946,16 +759,7 @@ export const updateStudentSeatInPlan = async (
 
   plan.updatedAt = new Date().toISOString();
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore update seat error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return { success: true, plan };
 };
@@ -970,8 +774,7 @@ export const moveStudentByTeacher = async (
   studentId: number,
   newLocation: number | 'bank'
 ): Promise<{ success: boolean; plan?: PublishedPlan; message?: string }> => {
-  const currentPlans = await getPublishedPlans();
-  const plan = currentPlans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return { success: false, message: 'Plan introuvable' };
 
   const studentCurrent = plan.placements.find(p => p.id === studentId);
@@ -997,19 +800,9 @@ export const moveStudentByTeacher = async (
   plan.placements = enrichPlacementsWithPhotos(updatedPlacements);
   plan.updatedAt = new Date().toISOString();
 
-  // Save to local cache first
-  const local = getLocalPlans();
-  const idx = local.findIndex(p => p.id === planId);
-  if (idx >= 0) local[idx] = plan;
-  saveLocalPlans(local);
 
   // Write directly to Firestore
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore live teacher move error:', e);
-  }
+  await writePlan(plan);
 
   return { success: true, plan };
 };
@@ -1021,24 +814,14 @@ export const updatePlanPlacementsByTeacher = async (
   planId: string,
   newPlacements: StudentPlacement[]
 ): Promise<{ success: boolean; plan?: PublishedPlan; message?: string }> => {
-  const currentPlans = await getPublishedPlans();
-  const plan = currentPlans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return { success: false, message: 'Plan introuvable' };
 
   plan.placements = enrichPlacementsWithPhotos(newPlacements);
   plan.updatedAt = new Date().toISOString();
 
-  const local = getLocalPlans();
-  const idx = local.findIndex(p => p.id === planId);
-  if (idx >= 0) local[idx] = plan;
-  saveLocalPlans(local);
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore live teacher update placements error:', e);
-  }
+  await writePlan(plan);
 
   return { success: true, plan };
 };
@@ -1053,8 +836,7 @@ export const updatePlanObstaclesByTeacher = async (
   unavailableCells: number[],
   cellObstacles: Record<number | string, { icon: string; label: string; svgKey?: string }>
 ): Promise<{ success: boolean; plan?: PublishedPlan; message?: string }> => {
-  const currentPlans = await getPublishedPlans();
-  const plan = currentPlans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return { success: false, message: 'Plan introuvable' };
 
   const unavailSet = new Set(unavailableCells);
@@ -1073,17 +855,8 @@ export const updatePlanObstaclesByTeacher = async (
   plan.cellObstacles = cellObstacles;
   plan.updatedAt = new Date().toISOString();
 
-  const local = getLocalPlans();
-  const idx = local.findIndex(p => p.id === planId);
-  if (idx >= 0) local[idx] = plan;
-  saveLocalPlans(local);
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore live teacher update obstacles error:', e);
-  }
+  await writePlan(plan);
 
   return { success: true, plan };
 };
@@ -1114,8 +887,7 @@ export const updateStudentPassword = async (
   studentId: number,
   newPass: string
 ): Promise<PublishedPlan | null> => {
-  const currentPlans = await getPublishedPlans();
-  const plan = currentPlans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return null;
 
   if (!plan.studentPasswords) {
@@ -1130,16 +902,7 @@ export const updateStudentPassword = async (
 
   plan.updatedAt = new Date().toISOString();
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore update password error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return plan;
 };
@@ -1149,8 +912,7 @@ export const resetStudentPasswordToDefault = async (
   planId: string,
   studentId: number
 ): Promise<PublishedPlan | null> => {
-  const currentPlans = await getPublishedPlans();
-  const plan = currentPlans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) return null;
 
   if (!plan.studentPasswords) {
@@ -1165,16 +927,7 @@ export const resetStudentPasswordToDefault = async (
 
   plan.updatedAt = new Date().toISOString();
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore password reset error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return plan;
 };
@@ -1239,8 +992,7 @@ export const saveStudentRemark = async (
     return { success: false, message: 'Données de remarque incomplètes.' };
   }
 
-  const currentPlans = await getPublishedPlans();
-  const plan = currentPlans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan) {
     return { success: false, message: 'Plan de classe introuvable.' };
   }
@@ -1302,16 +1054,7 @@ export const saveStudentRemark = async (
   plan.studentRemarks[key] = existingList;
   plan.updatedAt = now;
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore remark save error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return { success: true, plan };
 };
@@ -1329,8 +1072,7 @@ export const deleteStudentRemark = async (
     return { success: false, message: 'Paramètres invalides.' };
   }
 
-  const currentPlans = await getPublishedPlans();
-  const plan = currentPlans.find(p => p.id === planId);
+  const plan = await findPlan(planId);
   if (!plan || !plan.studentRemarks) {
     return { success: false, message: 'Plan introuvable.' };
   }
@@ -1340,16 +1082,7 @@ export const deleteStudentRemark = async (
   plan.studentRemarks[key] = existingList.filter(r => r.id !== remarkId);
   plan.updatedAt = new Date().toISOString();
 
-  try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore remark delete error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
-  }
+  await writePlan(plan);
 
   return { success: true, plan };
 };

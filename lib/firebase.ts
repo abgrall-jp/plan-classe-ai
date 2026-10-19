@@ -1,7 +1,13 @@
 import { initializeApp, getApps, getApp, type FirebaseApp } from 'firebase/app';
-import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import firebaseConfig from '../firebase-applet-config.json';
+import { getFirestore, doc, getDocFromServer, connectFirestoreEmulator } from 'firebase/firestore';
+import { getAuth, GoogleAuthProvider, connectAuthEmulator, onAuthStateChanged, type User } from 'firebase/auth';
+import appletConfigFile from '../firebase-applet-config.json';
+
+// Sur o2switch, le serveur écrit les réglages dans la page (window.__FIREBASE_CONFIG__) : la base peut changer sans recompiler.
+const firebaseConfig: typeof appletConfigFile & { emulators?: { host: string; firestorePort: number; authPort: number } } = {
+  ...appletConfigFile,
+  ...((typeof window !== 'undefined' && (window as any).__FIREBASE_CONFIG__) || {}),
+};
 
 let app: FirebaseApp;
 if (getApps().length > 0) {
@@ -24,7 +30,38 @@ export const db = firebaseConfig.firestoreDatabaseId
   : getFirestore(app);
 
 export const auth = getAuth(app);
+
+// Tests locaux uniquement : le serveur lancé avec USE_FIREBASE_EMULATORS=1 indique les émulateurs Firebase.
+if (firebaseConfig.emulators) {
+  const e = firebaseConfig.emulators;
+  connectAuthEmulator(auth, `http://${e.host}:${e.authPort}`, { disableWarnings: true });
+  connectFirestoreEmulator(db, e.host, e.firestorePort);
+}
 export const googleProvider = new GoogleAuthProvider();
+
+/** Attend que Firebase ait restauré la session (ou constaté qu'il n'y en a pas). */
+export const authReady: Promise<User | null> = new Promise(resolve => {
+  const unsub = onAuthStateChanged(auth, user => { unsub(); resolve(user); });
+});
+
+/** Adresse de l'administrateur (même règle que le serveur et les règles Firestore). */
+export const ADMIN_EMAIL = 'alimatlea@gmail.com';
+export const isAdminUser = (user: User | null | undefined) =>
+  !!user?.email && user.email.toLowerCase() === ADMIN_EMAIL && user.emailVerified !== false;
+
+// Échec d'enregistrement : l'application affiche un bandeau au lieu de se taire (voir SaveErrorBanner).
+export const SAVE_ERROR_EVENT = 'plan-classe-save-error';
+export const reportSaveError = (what: string, error: unknown) => {
+  console.warn(`[Enregistrement] ${what} :`, error);
+  handleFirestoreError(error, what);
+  if (typeof window !== 'undefined') {
+    const code = (error as any)?.code || '';
+    const detail = code === 'permission-denied'
+      ? "accès refusé (reconnectez-vous)"
+      : code === 'unavailable' ? 'pas de connexion Internet' : ((error as any)?.message || String(error));
+    window.dispatchEvent(new CustomEvent(SAVE_ERROR_EVENT, { detail: `${what} : ${detail}` }));
+  }
+};
 
 // Quota state and notification tracker
 let quotaExceededState = false;
@@ -92,5 +129,4 @@ export async function testConnection(): Promise<boolean> {
     }
   }
 }
-testConnection();
 

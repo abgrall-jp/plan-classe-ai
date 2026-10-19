@@ -35,8 +35,11 @@ import {
   setImpersonatedTeacher,
   syncTeacherProfileToFirestore,
   fetchAllTeachersForAdmin,
-  isSuperAdminEmail
+  isSuperAdminEmail,
+  teacherStorageKey,
+  watchTeacherSession
 } from '../services/teacherAuthService';
+import { loadCloudRosters, saveCloudRosters, mergeRosters } from '../services/rosterCloudService';
 import { TrombinoscopeModal } from './TrombinoscopeModal';
 import { StudentPhotoModal, PhotoModalData } from './StudentPhotoModal';
 import { LiveTeacherClassPlan } from './LiveTeacherClassPlan';
@@ -46,6 +49,7 @@ import {
   getStudentPhoto,
   registerPhotosBatch,
   compressImageToWebP,
+  refreshCloudPhotos,
 } from '../services/photoLibraryService';
 
 export interface TeacherProfile {
@@ -581,7 +585,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
       };
     }
     try {
-      const saved = localStorage.getItem('teacher_profile_v2');
+      const saved = localStorage.getItem(teacherStorageKey('teacher_profile_v2'));
       return saved ? JSON.parse(saved) : DEFAULT_TEACHER_PROFILE;
     } catch {
       return DEFAULT_TEACHER_PROFILE;
@@ -594,15 +598,19 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
       const updatedProf: TeacherProfile = {
         firstName: teacher.firstName,
         lastName: teacher.lastName,
-        disciplines: teacher.disciplines,
-        classes: teacher.classes,
+        disciplines: teacher.disciplines || [],
+        classes: teacher.classes || [],
       };
       setProfile(updatedProf);
-      if (teacher.classes.length > 0) {
-        setSelectedClasses([teacher.classes[0]]);
-      }
+      setSelectedClasses(updatedProf.classes.length > 0 ? [updatedProf.classes[0]] : []);
+    } else {
+      setProfile(DEFAULT_TEACHER_PROFILE);
+      setSelectedClasses([]);
     }
   };
+
+  // Session expirée ou fermée dans un autre onglet : on revient à l'écran de connexion.
+  useEffect(() => watchTeacherSession((acc) => handleTeacherChange(getImpersonatedTeacher() || acc)), []);
 
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [editFirstName, setEditFirstName] = useState(profile.firstName);
@@ -658,12 +666,58 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
   // Class Roster Storage (Students per class)
   const [classRosters, setClassRosters] = useState<Record<string, Student[]>>(() => {
     try {
-      const saved = localStorage.getItem('class_rosters_v2');
+      const saved = localStorage.getItem(teacherStorageKey('class_rosters_v2'));
       return saved ? JSON.parse(saved) : {};
     } catch {
       return {};
     }
   });
+
+  // Listes de l'enseignant affiché : celles de ce navigateur, complétées par celles de la base.
+  const rostersOwnerUid = currentTeacher?.uid || '';
+  const [rostersLoadedFor, setRostersLoadedFor] = useState<string>('');
+  useEffect(() => {
+    let cancelled = false;
+    setRostersLoadedFor('');
+    let local: Record<string, Student[]> = {};
+    try {
+      const saved = localStorage.getItem(teacherStorageKey('class_rosters_v2'));
+      local = saved ? JSON.parse(saved) : {};
+    } catch { /* ignore */ }
+    setClassRosters(local);
+    if (!rostersOwnerUid) return;
+    loadCloudRosters(rostersOwnerUid).then(cloud => {
+      if (cancelled) return;
+      if (cloud) {
+        const merged = mergeRosters(cloud, local);
+        setClassRosters(merged);
+        try { localStorage.setItem(teacherStorageKey('class_rosters_v2'), JSON.stringify(merged)); } catch { /* plein */ }
+        if (Object.keys(local).some(k => !(k in cloud))) saveCloudRosters(rostersOwnerUid, merged);
+        setRostersLoadedFor(rostersOwnerUid);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [rostersOwnerUid]);
+
+  // Toute modification des listes est enregistrée dans la base (une fois la version de la base chargée).
+  useEffect(() => {
+    if (rostersOwnerUid && rostersLoadedFor === rostersOwnerUid) saveCloudRosters(rostersOwnerUid, classRosters);
+  }, [classRosters, rostersLoadedFor, rostersOwnerUid]);
+
+  // Les classes ajoutées au profil sont enregistrées dans la fiche de l'enseignant (auparavant seulement dans le navigateur).
+  useEffect(() => {
+    if (!currentTeacher) return;
+    const same = JSON.stringify([currentTeacher.firstName, currentTeacher.lastName, currentTeacher.classes, currentTeacher.disciplines])
+      === JSON.stringify([profile.firstName, profile.lastName, profile.classes, profile.disciplines]);
+    if (same) return;
+    const t = setTimeout(() => {
+      const updated: TeacherAccount = { ...currentTeacher, ...profile, updatedAt: new Date().toISOString() };
+      setCurrentTeacher(updated);
+      syncTeacherProfileToFirestore(updated);
+      if (getImpersonatedTeacher()) setImpersonatedTeacher(updated);
+    }, 600);
+    return () => clearTimeout(t);
+  }, [profile, currentTeacher]);
 
   // Modal State for Class Editing & Student Import
   const [editingClass, setEditingClass] = useState<string | null>(null);
@@ -755,6 +809,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
   // Load teacher list for Admin
   useEffect(() => {
     let isMounted = true;
+    if (!isAdmin) return;
     fetchAllTeachersForAdmin().then((teachers) => {
       if (isMounted && teachers) {
         setAllTeachersList(teachers);
@@ -764,7 +819,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
       }
     });
     return () => { isMounted = false; };
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     const unsubscribe = subscribeToPublishedPlans((plans) => {
@@ -772,7 +827,10 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
       setLoadingDbPlans(false);
     });
     return () => unsubscribe();
-  }, []);
+  }, [currentTeacher?.uid]);
+
+  // Photos de l'enseignant affiché (changement de compte ou consultation par l'administrateur)
+  useEffect(() => { refreshCloudPhotos(); }, [currentTeacher?.uid]);
 
   useEffect(() => {
     const name = profile.lastName ? `M. ${profile.lastName}`.trim() : '';
@@ -802,7 +860,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
     };
     setProfile(updated);
     try {
-      localStorage.setItem('teacher_profile_v2', JSON.stringify(updated));
+      localStorage.setItem(teacherStorageKey('teacher_profile_v2'), JSON.stringify(updated));
     } catch (err) {
       console.error("Erreur sauvegarde profil:", err);
     }
@@ -975,7 +1033,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
       const updatedProfile = { ...profile, classes: updatedProfileClasses };
       setProfile(updatedProfile);
       try {
-        localStorage.setItem('teacher_profile_v2', JSON.stringify(updatedProfile));
+        localStorage.setItem(teacherStorageKey('teacher_profile_v2'), JSON.stringify(updatedProfile));
       } catch (err) {
         console.error(err);
       }
@@ -993,7 +1051,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
       delete updatedRosters[editingClass];
       setClassRosters(updatedRosters);
       try {
-        localStorage.setItem('class_rosters_v2', JSON.stringify(updatedRosters));
+        localStorage.setItem(teacherStorageKey('class_rosters_v2'), JSON.stringify(updatedRosters));
       } catch (err) {
         console.error(err);
       }
@@ -1288,7 +1346,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
     };
     setClassRosters(updatedRosters);
     try {
-      localStorage.setItem('class_rosters_v2', JSON.stringify(updatedRosters));
+      localStorage.setItem(teacherStorageKey('class_rosters_v2'), JSON.stringify(updatedRosters));
     } catch (err) {
       console.error("Erreur sauvegarde liste classe:", err);
     }
@@ -1326,7 +1384,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
     };
     setClassRosters(updatedRosters);
     try {
-      localStorage.setItem('class_rosters_v2', JSON.stringify(updatedRosters));
+      localStorage.setItem(teacherStorageKey('class_rosters_v2'), JSON.stringify(updatedRosters));
     } catch (err) {
       console.error("Erreur sauvegarde liste classe:", err);
     }
@@ -1401,7 +1459,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
         };
         setProfile(updatedProf);
         try {
-          localStorage.setItem('teacher_profile_v2', JSON.stringify(updatedProf));
+          localStorage.setItem(teacherStorageKey('teacher_profile_v2'), JSON.stringify(updatedProf));
         } catch (e) {
           console.error(e);
         }
@@ -1448,7 +1506,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
       };
       setProfile(updatedProf);
       try {
-        localStorage.setItem('teacher_profile_v2', JSON.stringify(updatedProf));
+        localStorage.setItem(teacherStorageKey('teacher_profile_v2'), JSON.stringify(updatedProf));
       } catch (e) {
         console.error(e);
       }
@@ -1829,7 +1887,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
       };
       setProfile(updatedProfile);
       try {
-        localStorage.setItem('teacher_profile_v2', JSON.stringify(updatedProfile));
+        localStorage.setItem(teacherStorageKey('teacher_profile_v2'), JSON.stringify(updatedProfile));
       } catch (err) {
         console.error("Erreur sauvegarde profil:", err);
       }
@@ -4294,7 +4352,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                               const updatedProf = { ...profile, classes: [...profile.classes, trimmed] };
                               setProfile(updatedProf);
                               try {
-                                localStorage.setItem('teacher_profile_v2', JSON.stringify(updatedProf));
+                                localStorage.setItem(teacherStorageKey('teacher_profile_v2'), JSON.stringify(updatedProf));
                               } catch (err) {
                                 console.error(err);
                               }
@@ -4316,7 +4374,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
                               const updatedProf = { ...profile, classes: [...profile.classes, trimmed] };
                               setProfile(updatedProf);
                               try {
-                                localStorage.setItem('teacher_profile_v2', JSON.stringify(updatedProf));
+                                localStorage.setItem(teacherStorageKey('teacher_profile_v2'), JSON.stringify(updatedProf));
                               } catch (err) {
                                 console.error(err);
                               }
@@ -4814,7 +4872,7 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
               };
               setClassRosters(updatedRosters);
               try {
-                localStorage.setItem('class_rosters_v2', JSON.stringify(updatedRosters));
+                localStorage.setItem(teacherStorageKey('class_rosters_v2'), JSON.stringify(updatedRosters));
               } catch (e) {
                 console.warn('Error persisting rosters on photo apply:', e);
               }

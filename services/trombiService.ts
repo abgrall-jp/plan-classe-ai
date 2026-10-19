@@ -1,4 +1,6 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { generateAI } from './api';
+
+const Type = { OBJECT: 'OBJECT', ARRAY: 'ARRAY', STRING: 'STRING', INTEGER: 'INTEGER', BOOLEAN: 'BOOLEAN' } as const;
 import * as pdfjsLib from 'pdfjs-dist';
 
 // Configure pdfjs worker
@@ -9,9 +11,6 @@ try {
   console.warn('Could not set pdfjs workerSrc:', e);
 }
 
-const getApiKey = (): string => {
-  return process.env.GEMINI_API_KEY || process.env.API_KEY || '';
-};
 
 export interface ExtractedTrombiStudent {
   name: string;
@@ -226,20 +225,6 @@ export const processMultiplePhotoFiles = async (
 export const extractTrombiWithGemini = async (
   canvas: HTMLCanvasElement
 ): Promise<TrombiExtractionResult> => {
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error("Clé d'API Gemini manquante. Veuillez vérifier la configuration de l'application.");
-  }
-
-  const ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-
   // Convert canvas to base64 jpeg
   const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
   const base64Data = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
@@ -257,9 +242,7 @@ Extrait également s'ils existent :
 - "className" : le nom de la classe (ex: "SECONDE 3" ou "203").
 - "year" : l'année scolaire (ex: "2026 - 2027").`;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.8-flash',
-    contents: [
+  const responseText = await generateAI([
       {
         inlineData: {
           mimeType: 'image/jpeg',
@@ -269,8 +252,7 @@ Extrait également s'ils existent :
       {
         text: prompt,
       },
-    ],
-    config: {
+    ], {
       temperature: 0.1,
       responseMimeType: 'application/json',
       responseSchema: {
@@ -296,10 +278,9 @@ Extrait également s'ils existent :
         },
         required: ['students'],
       },
-    },
-  });
+    });
 
-  const jsonText = response.text ? response.text.trim() : '';
+  const jsonText = responseText.trim();
   if (!jsonText) {
     throw new Error("L'IA n'a retourné aucune réponse pour ce trombinoscope.");
   }

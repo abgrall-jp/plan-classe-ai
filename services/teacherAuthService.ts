@@ -1,4 +1,4 @@
-import { auth, googleProvider, db } from '../lib/firebase';
+import { auth, googleProvider, db, isAdminUser } from '../lib/firebase';
 import {
   signInWithPopup,
   signInWithEmailAndPassword,
@@ -69,11 +69,20 @@ export const createDefaultProfileForEmail = (
     firstName,
     lastName,
     disciplines: isSuper ? ['Administration Globale', 'Informatique'] : [],
-    classes: isSuper ? ['Toutes les classes'] : [],
+    classes: [],
     role: isSuper ? 'super_admin' : 'teacher',
     photoURL: photoURL || undefined,
     updatedAt: new Date().toISOString(),
   };
+};
+
+/**
+ * Clé de stockage du navigateur propre à l'enseignant affiché (listes de classes, profil) :
+ * deux collègues sur le même ordinateur de l'établissement ne voient pas les classes de l'autre.
+ */
+export const teacherStorageKey = (base: string): string => {
+  const acc = getImpersonatedTeacher() || getLocalTeacherAccount();
+  return acc?.uid ? `${base}:${acc.uid}` : `${base}:anonyme`;
 };
 
 // Save local teacher account
@@ -97,10 +106,13 @@ export const getLocalTeacherAccount = (): TeacherAccount | null => {
 
 // Sync profile to Firestore
 export const syncTeacherProfileToFirestore = async (account: TeacherAccount): Promise<TeacherAccount> => {
-  saveLocalTeacherAccount(account);
+  // La session locale n'est mise à jour que pour le compte connecté lui-même (pas quand l'administrateur modifie un collègue).
+  if (!auth.currentUser || auth.currentUser.uid === account.uid) saveLocalTeacherAccount(account);
   try {
     const docRef = doc(db, TEACHERS_COLLECTION, account.uid);
-    await setDoc(docRef, account, { merge: true });
+    const { role, ...rest } = account;
+    // Le rôle n'est écrit que par l'administrateur : un enseignant ne peut pas se l'attribuer.
+    await setDoc(docRef, isAdminUser(auth.currentUser) ? account : rest, { merge: true });
   } catch (err) {
     console.warn('Firestore teacher sync fallback:', err);
   }
@@ -121,11 +133,12 @@ export const fetchOrCreateTeacherProfile = async (
 
     if (snap.exists()) {
       const data = snap.data() as TeacherAccount;
-      // Guarantee super_admin role if email is alimatlea@gmail.com
-      if (isSuper && data.role !== 'super_admin') {
-        data.role = 'super_admin';
-        await setDoc(docRef, { role: 'super_admin' }, { merge: true });
-      }
+      data.uid = uid;
+      data.email = data.email || email;
+      // Le rôle d'administrateur dépend seulement de l'adresse vérifiée, jamais du profil enregistré.
+      data.role = isSuper && isAdminUser(firebaseUser) ? 'super_admin' : 'teacher';
+      data.classes = Array.isArray(data.classes) ? data.classes : [];
+      data.disciplines = Array.isArray(data.disciplines) ? data.disciplines : [];
       saveLocalTeacherAccount(data);
       return data;
     }
@@ -139,6 +152,7 @@ export const fetchOrCreateTeacherProfile = async (
     firebaseUser.displayName,
     firebaseUser.photoURL
   );
+  if (newProfile.role === 'super_admin' && !isAdminUser(firebaseUser)) newProfile.role = 'teacher';
 
   return await syncTeacherProfileToFirestore(newProfile);
 };
@@ -172,6 +186,43 @@ export const loginWithGoogle = async (): Promise<TeacherAccount> => {
   }
 };
 
+/** Message compréhensible pour les erreurs de connexion Firebase. */
+export const authErrorMessage = (err: any): string => {
+  const code = String(err?.code || '');
+  if (['auth/invalid-credential', 'auth/wrong-password', 'auth/user-not-found', 'auth/invalid-login-credentials'].includes(code)) {
+    return "Adresse e-mail ou mot de passe incorrect.";
+  }
+  if (code === 'auth/email-already-in-use') return "Un compte existe déjà avec cette adresse : utilisez l'onglet « Connexion ».";
+  if (code === 'auth/weak-password') return 'Le mot de passe doit comporter au moins 6 caractères.';
+  if (code === 'auth/invalid-email') return "L'adresse e-mail n'est pas valide.";
+  if (code === 'auth/too-many-requests') return 'Trop de tentatives. Réessayez dans quelques minutes.';
+  if (code === 'auth/network-request-failed') return 'Connexion impossible : vérifiez votre accès à Internet.';
+  return err?.message || 'Échec de la connexion.';
+};
+
+/**
+ * Suit la session Firebase : renvoie le profil quand un enseignant est connecté,
+ * et null quand la session a expiré (le profil gardé dans le navigateur est alors effacé).
+ */
+export const watchTeacherSession = (onChange: (account: TeacherAccount | null) => void) =>
+  onAuthStateChanged(auth, async (user) => {
+    if (!user || !user.email) {
+      if (getLocalTeacherAccount()) {
+        localStorage.removeItem(LOCAL_AUTH_KEY);
+        localStorage.removeItem(IMPERSONATE_KEY);
+        onChange(null);
+      }
+      return;
+    }
+    const local = getLocalTeacherAccount();
+    if (local && local.uid === user.uid) return;
+    try {
+      onChange(await fetchOrCreateTeacherProfile(user));
+    } catch {
+      /* hors ligne : on garde l'état actuel */
+    }
+  });
+
 // Sign in with Email / Password
 export const loginWithEmail = async (email: string, pass: string): Promise<TeacherAccount> => {
   const isSuper = isSuperAdminEmail(email);
@@ -182,15 +233,7 @@ export const loginWithEmail = async (email: string, pass: string): Promise<Teach
   } catch (err: any) {
     console.warn('Firebase Email Auth Failed:', err);
 
-    if (err?.code === 'auth/network-request-failed' && !isSuper) {
-      const localProfile = createDefaultProfileForEmail(
-        `user-${Date.now()}`,
-        email.trim()
-      );
-      return await syncTeacherProfileToFirestore(localProfile);
-    }
-
-    throw new Error(err?.message || "Échec de la connexion par e-mail.");
+    throw new Error(authErrorMessage(err));
   }
 };
 
@@ -210,28 +253,17 @@ export const registerWithEmail = async (
     const profile: TeacherAccount = {
       uid: result.user.uid,
       email: email.trim(),
-      firstName: firstName.trim() || 'Professeur',
-      lastName: lastName.trim() || 'Enseignant',
-      disciplines: disciplines,
-      classes: classes,
-      role: isSuper ? 'super_admin' : 'teacher',
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      disciplines: disciplines.filter(Boolean),
+      classes: classes.filter(Boolean),
+      role: isSuper && isAdminUser(result.user) ? 'super_admin' : 'teacher',
       updatedAt: new Date().toISOString(),
     };
     return await syncTeacherProfileToFirestore(profile);
   } catch (err: any) {
-    console.warn('Firebase Registration fallback to local mode:', err);
-    const profile: TeacherAccount = {
-      uid: `local-${Date.now()}`,
-      email: email.trim(),
-      firstName: firstName.trim() || 'Professeur',
-      lastName: lastName.trim() || 'Enseignant',
-      disciplines: disciplines,
-      classes: classes,
-      role: isSuper ? 'super_admin' : 'teacher',
-      updatedAt: new Date().toISOString(),
-    };
-    saveLocalTeacherAccount(profile);
-    return profile;
+    console.warn('Firebase Registration error:', err);
+    throw new Error(authErrorMessage(err));
   }
 };
 
@@ -248,9 +280,9 @@ export const logoutTeacher = async (): Promise<void> => {
 
 // Fetch all registered teachers (For Super Admin)
 export const fetchAllTeachersForAdmin = async (): Promise<TeacherAccount[]> => {
-  const defaultList: TeacherAccount[] = [
-    createDefaultProfileForEmail('admin-alimatlea-1', 'alimatlea@gmail.com', 'JP Abgrall'),
-  ];
+  const defaultList: TeacherAccount[] = [];
+  // Liste réservée à l'administrateur (les règles de la base refusent les autres comptes).
+  if (!isAdminUser(auth.currentUser)) return defaultList;
 
   try {
     const snap = await getDocs(collection(db, TEACHERS_COLLECTION));

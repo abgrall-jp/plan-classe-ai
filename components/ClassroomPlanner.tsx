@@ -531,7 +531,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
     setPublishSuccessMsg(null);
     try {
       const existing = await getPublishedPlans();
-      setPublishedPlansList(existing);
+      setAllPublishedPlans(existing);
     } catch (e) {
       console.error(e);
     }
@@ -577,7 +577,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
     setPublishSuccessMsg(`✅ Plan publié avec succès (${count} publication(s)) pour ${classesList.join(', ')} sur la/les période(s) : ${targetPeriods.join(', ')} !`);
     
     const fresh = await getPublishedPlans();
-    setPublishedPlansList(fresh);
+    setAllPublishedPlans(fresh);
   };
 
   const handleDuplicateToPeriod = async (planToDup: PublishedPlan, targetPeriod: string) => {
@@ -587,7 +587,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
       setPublishSuccessMsg(`✅ Plan de ${planToDup.className} dupliqué avec succès vers la période "${targetPeriod.trim()}" !`);
       setSelectedPlanToDuplicatePeriod(null);
       const fresh = await getPublishedPlans();
-      setPublishedPlansList(fresh);
+      setAllPublishedPlans(fresh);
     } catch (e) {
       console.error(e);
       alert("Erreur lors de la duplication du plan.");
@@ -597,19 +597,19 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
   const handleToggleFreeze = async (planId: string, currentFreezeState: boolean) => {
     await toggleFreezePlan(planId, !currentFreezeState);
     const fresh = await getPublishedPlans();
-    setPublishedPlansList(fresh);
+    setAllPublishedPlans(fresh);
   };
 
   const handleDeletePlan = async (planId: string) => {
     await deletePublishedPlan(planId);
     const fresh = await getPublishedPlans();
-    setPublishedPlansList(fresh);
+    setAllPublishedPlans(fresh);
   };
 
   const handleResetPassword = async (planId: string, studentId: number, studentName: string) => {
     await resetStudentPasswordToDefault(planId, studentId);
     const fresh = await getPublishedPlans();
-    setPublishedPlansList(fresh);
+    setAllPublishedPlans(fresh);
     alert(`Le mot de passe de ${studentName} a été réinitialisé à 0000.`);
   };
 
@@ -955,7 +955,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
           });
         }
         const fresh = await getPublishedPlans();
-        setPublishedPlansList(fresh);
+        setAllPublishedPlans(fresh);
       } catch (e) {
         console.error("Cloud auto-save error:", e);
       }
@@ -1732,7 +1732,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
                 });
             }
             const fresh = await getPublishedPlans();
-            setPublishedPlansList(fresh);
+            setAllPublishedPlans(fresh);
         } catch (e) {
             console.error("Cloud auto-save error on reset placement:", e);
         }
