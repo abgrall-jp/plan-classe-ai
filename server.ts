@@ -941,6 +941,8 @@ async function startServer() {
     const indexHtml = fs.readFileSync(path.join(distPath, "index.html"), "utf8").replace("<head>", `<head>${configScript}`);
     const sendIndex = (_req: Request, res: Response) => { res.setHeader("Cache-Control", "no-cache"); res.type("html").send(indexHtml); };
     app.get(["/", "/index.html"], sendIndex);
+    // Le code du serveur (server.cjs) est rangé dans dist/ mais ne doit jamais être téléchargeable.
+    app.use((req, res, next) => (/^\/server\.cjs/i.test(req.path) ? res.status(404).end() : next()));
     app.use(express.static(distPath, { index: false }));
     app.get("*", sendIndex);
   }
