@@ -137,7 +137,7 @@ export const renderImageFileToCanvas = async (file: File): Promise<HTMLCanvasEle
   });
 };
 
-import { compressImageToWebP } from './photoLibraryService';
+import { compressImageToWebP, createWebpAvatar } from './photoLibraryService';
 
 /**
  * Crops a sub-rectangle from a canvas and returns a lightweight, crisp WebP/JPEG data URL (thumbnail size max 120x150)

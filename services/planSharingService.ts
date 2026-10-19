@@ -11,6 +11,52 @@ import {
   writeBatch
 } from 'firebase/firestore';
 import { getStudentPhoto } from './photoLibraryService';
+import { getImpersonatedTeacher, getLocalTeacherAccount } from './teacherAuthService';
+
+export interface PlanOwner {
+  uid?: string;
+  email?: string;
+  classes?: string[];
+  isSuperAdmin?: boolean;
+}
+
+export const getActivePlanOwner = (): PlanOwner | null => {
+  const account = getImpersonatedTeacher() || getLocalTeacherAccount();
+  if (!account) return null;
+  return {
+    uid: account.uid,
+    email: account.email,
+    classes: account.classes || [],
+    isSuperAdmin: account.role === 'super_admin'
+  };
+};
+
+export const isPlanOwnedBy = (plan: PublishedPlan, owner: PlanOwner | null): boolean => {
+  if (!owner) return true;
+  if (owner.isSuperAdmin) return true;
+
+  if (plan.teacherId || plan.teacherEmail) {
+    if (owner.uid && plan.teacherId && plan.teacherId === owner.uid) {
+      return true;
+    }
+    if (owner.email && plan.teacherEmail && plan.teacherEmail.trim().toLowerCase() === owner.email.trim().toLowerCase()) {
+      return true;
+    }
+    return false;
+  }
+
+  // Legacy plan without teacherId or teacherEmail
+  if (!plan.className) return false;
+  const planClasses = plan.className.split(',').map(c => c.trim().toLowerCase());
+  const teacherClasses = (owner.classes || []).map(c => c.trim().toLowerCase());
+
+  return planClasses.some(pc => teacherClasses.includes(pc));
+};
+
+export const filterPlansForOwner = (plans: PublishedPlan[], owner: PlanOwner | null): PublishedPlan[] => {
+  if (!Array.isArray(plans)) return [];
+  return plans.filter(plan => isPlanOwnedBy(plan, owner));
+};
 
 export interface StudentPasswordEntry {
   password?: string; // Cleartext or hashed string password
@@ -102,7 +148,7 @@ const LOCAL_STORAGE_KEY = 'plan_de_classe_published_plans_v3';
 const INITIAL_DEMO_PLANS: PublishedPlan[] = [
   {
     id: 'demo-plan-1',
-    teacherName: 'M. Abgrall (Mathématiques)',
+    teacherName: 'M. / Mme Enseignant',
     className: '3ème A',
     period: 'Période 1 (Septembre - Toussaint)',
     allowStudentSelfPlacement: true,
@@ -264,6 +310,7 @@ export const reconcileLocalPlansToFirestore = async (): Promise<void> => {
   hasReconciledPlansThisSession = true;
 
   try {
+    const activeOwner = getActivePlanOwner();
     const localPlans = getLocalPlans();
     if (!Array.isArray(localPlans) || localPlans.length === 0) return;
 
@@ -279,6 +326,10 @@ export const reconcileLocalPlansToFirestore = async (): Promise<void> => {
 
     for (const plan of localPlans) {
       if (!plan || !plan.id) continue;
+      // Skip demo plans and plans not owned by connected teacher
+      if (plan.id.startsWith('demo-')) continue;
+      if (!isPlanOwnedBy(plan, activeOwner)) continue;
+
       const remote = remotePlanMap.get(plan.id);
 
       // If remote already exists and has photos, skip
@@ -328,6 +379,8 @@ export const duplicatePlanToPeriod = async (
 ): Promise<PublishedPlan> => {
   const newPlan: Omit<PublishedPlan, 'id' | 'updatedAt'> = {
     teacherName: originalPlan.teacherName,
+    teacherId: originalPlan.teacherId,
+    teacherEmail: originalPlan.teacherEmail,
     className: originalPlan.className,
     period: targetPeriod,
     allowStudentSelfPlacement: originalPlan.allowStudentSelfPlacement,
@@ -344,17 +397,32 @@ export const duplicatePlanToPeriod = async (
 export const savePublishedPlan = async (
   plan: Omit<PublishedPlan, 'id' | 'updatedAt'> & { id?: string }
 ): Promise<PublishedPlan> => {
+  const activeOwner = getActivePlanOwner();
+  const teacherId = plan.teacherId || activeOwner?.uid;
+  const teacherEmail = plan.teacherEmail || activeOwner?.email;
+
   const normTeacher = (plan.teacherName || '').trim().toLowerCase();
   const normClass = (plan.className || '').trim().toLowerCase();
   const normPeriod = (plan.period || '').trim().toLowerCase();
 
-  // Search for existing plan for same teacher, class, and period to update it instead of duplicating
+  // Search for existing plan for same teacher/owner, class, and period
   const localOrDbPlans = await getPublishedPlans();
   const existing = localOrDbPlans.find(p => {
-    const pTeacher = p.teacherName.trim().toLowerCase();
     const pClass = p.className.trim().toLowerCase();
     const pPeriod = p.period.trim().toLowerCase();
-    return pTeacher === normTeacher && pClass === normClass && pPeriod === normPeriod;
+    if (pClass !== normClass || pPeriod !== normPeriod) return false;
+
+    if (p.teacherId || p.teacherEmail) {
+      const matchUid = teacherId && p.teacherId === teacherId;
+      const matchEmail = teacherEmail && p.teacherEmail?.trim().toLowerCase() === teacherEmail.trim().toLowerCase();
+      return Boolean(matchUid || matchEmail);
+    } else {
+      const pTeacher = p.teacherName.trim().toLowerCase();
+      if (pTeacher === normTeacher && isPlanOwnedBy(p, activeOwner)) {
+        return true;
+      }
+      return false;
+    }
   });
 
   let targetId: string;
@@ -398,6 +466,8 @@ export const savePublishedPlan = async (
   const newRecord: PublishedPlan = {
     ...plan,
     id: targetId,
+    teacherId,
+    teacherEmail,
     cellObstacles,
     placements: sanitizedPlacements,
     isFrozen: plan.isFrozen ?? false,
@@ -476,18 +546,15 @@ export const syncClassRosterWithCurrentPlans = async (
   teacherName?: string,
   customPasswords?: Record<string | number, StudentPasswordEntry>
 ): Promise<PublishedPlan[]> => {
-  const currentPlans = await getPublishedPlans();
+  const activeOwner = getActivePlanOwner();
+  const allPlans = await getPublishedPlans();
+  const currentPlans = filterPlansForOwner(allPlans, activeOwner);
   const normTarget = targetClassName.trim().toLowerCase();
 
   const matchingPlans = currentPlans.filter(p => {
     if (!p.className) return false;
     const classes = p.className.split(',').map(c => c.trim().toLowerCase());
-    return (
-      classes.includes(normTarget) ||
-      p.className.trim().toLowerCase() === normTarget ||
-      p.className.toLowerCase().includes(normTarget) ||
-      normTarget.includes(p.className.toLowerCase())
-    );
+    return classes.includes(normTarget) || p.className.trim().toLowerCase() === normTarget;
   });
 
   if (matchingPlans.length === 0) {
@@ -510,7 +577,9 @@ export const syncClassRosterWithCurrentPlans = async (
 
       const newPlanRecord: PublishedPlan = {
         id: newPlanId,
-        teacherName: teacherName || 'M. Abgrall (Mathématiques)',
+        teacherName: teacherName || 'Enseignant',
+        teacherId: activeOwner?.uid,
+        teacherEmail: activeOwner?.email,
         className: targetClassName.trim(),
         period: 'Période 1 (Septembre - Toussaint)',
         allowStudentSelfPlacement: true,
@@ -687,12 +756,15 @@ export const duplicatePublishedPlanForClass = async (planId: string, newClassNam
   const originalPlan = plans.find(p => p.id === planId);
   if (!originalPlan) return null;
 
+  const activeOwner = getActivePlanOwner();
   const targetClassName = newClassName.trim() || 'Nouvelle classe';
   const newId = `pub-${targetClassName.replace(/\s+/g, '-').toLowerCase()}-${Date.now()}`;
 
   const duplicatedPlan: PublishedPlan = {
     ...originalPlan,
     id: newId,
+    teacherId: originalPlan.teacherId || activeOwner?.uid,
+    teacherEmail: originalPlan.teacherEmail || activeOwner?.email,
     className: targetClassName,
     updatedAt: new Date().toISOString(),
   };

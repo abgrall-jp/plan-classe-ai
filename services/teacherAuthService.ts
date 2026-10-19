@@ -35,8 +35,7 @@ const IMPERSONATE_KEY = 'superadmin_impersonate_target_v1';
 // Check if email belongs to Super Admin
 export const isSuperAdminEmail = (email: string | null | undefined): boolean => {
   if (!email) return false;
-  const lower = email.toLowerCase().trim();
-  return lower === 'alimatlea@gmail.com' || lower.startsWith('alimatlea');
+  return email.toLowerCase().trim() === 'alimatlea@gmail.com';
 };
 
 // Default profile generator
@@ -47,8 +46,8 @@ export const createDefaultProfileForEmail = (
   photoURL?: string | null
 ): TeacherAccount => {
   const isSuper = isSuperAdminEmail(email);
-  let firstName = 'Mathieu';
-  let lastName = 'Abgrall';
+  let firstName = '';
+  let lastName = '';
 
   if (displayName) {
     const parts = displayName.trim().split(' ');
@@ -69,8 +68,8 @@ export const createDefaultProfileForEmail = (
     email: email || 'prof@enseignant.fr',
     firstName,
     lastName,
-    disciplines: isSuper ? ['Administration Globale', 'Informatique'] : ['Mathématiques', 'SNT'],
-    classes: isSuper ? ['Toutes les classes'] : ['3ème A', '3ème B', '4ème A', 'Option SNT'],
+    disciplines: isSuper ? ['Administration Globale', 'Informatique'] : [],
+    classes: isSuper ? ['Toutes les classes'] : [],
     role: isSuper ? 'super_admin' : 'teacher',
     photoURL: photoURL || undefined,
     updatedAt: new Date().toISOString(),
@@ -154,13 +153,8 @@ export const loginAsSuperAdminFallback = async (password: string): Promise<Teach
     const result = await signInWithEmailAndPassword(auth, 'alimatlea@gmail.com', password.trim());
     return await fetchOrCreateTeacherProfile(result.user);
   } catch (err: any) {
-    console.warn('Firebase Email Auth for Super Admin failed/offline, using fallback profile:', err);
-    const superAdminProfile = createDefaultProfileForEmail(
-      'admin-alimatlea-1',
-      'alimatlea@gmail.com',
-      'JP Abgrall'
-    );
-    return await syncTeacherProfileToFirestore(superAdminProfile);
+    console.warn('Firebase Email Auth for Super Admin failed:', err);
+    throw new Error("Connexion Administrateur refusée");
   }
 };
 
@@ -186,15 +180,17 @@ export const loginWithEmail = async (email: string, pass: string): Promise<Teach
     const result = await signInWithEmailAndPassword(auth, email.trim(), pass);
     return await fetchOrCreateTeacherProfile(result.user);
   } catch (err: any) {
-    console.warn('Firebase Email Auth Failed, using fallback profile:', err);
+    console.warn('Firebase Email Auth Failed:', err);
 
-    // Smooth fallback for teacher or super admin
-    const localProfile = createDefaultProfileForEmail(
-      isSuper ? 'admin-alimatlea-1' : `user-${Date.now()}`,
-      email.trim(),
-      isSuper ? 'JP Abgrall' : undefined
-    );
-    return await syncTeacherProfileToFirestore(localProfile);
+    if (err?.code === 'auth/network-request-failed' && !isSuper) {
+      const localProfile = createDefaultProfileForEmail(
+        `user-${Date.now()}`,
+        email.trim()
+      );
+      return await syncTeacherProfileToFirestore(localProfile);
+    }
+
+    throw new Error(err?.message || "Échec de la connexion par e-mail.");
   }
 };
 
@@ -216,8 +212,8 @@ export const registerWithEmail = async (
       email: email.trim(),
       firstName: firstName.trim() || 'Professeur',
       lastName: lastName.trim() || 'Enseignant',
-      disciplines: disciplines.length > 0 ? disciplines : ['Mathématiques'],
-      classes: classes.length > 0 ? classes : ['3ème A'],
+      disciplines: disciplines,
+      classes: classes,
       role: isSuper ? 'super_admin' : 'teacher',
       updatedAt: new Date().toISOString(),
     };
@@ -229,8 +225,8 @@ export const registerWithEmail = async (
       email: email.trim(),
       firstName: firstName.trim() || 'Professeur',
       lastName: lastName.trim() || 'Enseignant',
-      disciplines: disciplines.length > 0 ? disciplines : ['Mathématiques'],
-      classes: classes.length > 0 ? classes : ['3ème A'],
+      disciplines: disciplines,
+      classes: classes,
       role: isSuper ? 'super_admin' : 'teacher',
       updatedAt: new Date().toISOString(),
     };
@@ -254,36 +250,6 @@ export const logoutTeacher = async (): Promise<void> => {
 export const fetchAllTeachersForAdmin = async (): Promise<TeacherAccount[]> => {
   const defaultList: TeacherAccount[] = [
     createDefaultProfileForEmail('admin-alimatlea-1', 'alimatlea@gmail.com', 'JP Abgrall'),
-    {
-      uid: 'prof-abgrall-1',
-      email: 'm.abgrall@etablissement.fr',
-      firstName: 'Mathieu',
-      lastName: 'Abgrall',
-      disciplines: ['Mathématiques', 'SNT'],
-      classes: ['3ème A', '3ème B', '4ème A', 'Option SNT'],
-      role: 'teacher',
-      updatedAt: new Date().toISOString(),
-    },
-    {
-      uid: 'prof-dubois-2',
-      email: 'mme.dubois@etablissement.fr',
-      firstName: 'Sophie',
-      lastName: 'Dubois',
-      disciplines: ['Français', 'Lettres Classiques'],
-      classes: ['4ème B', '5ème A', '6ème B'],
-      role: 'teacher',
-      updatedAt: new Date().toISOString(),
-    },
-    {
-      uid: 'prof-martin-3',
-      email: 'j.martin@etablissement.fr',
-      firstName: 'Jean',
-      lastName: 'Martin',
-      disciplines: ['Histoire-Géographie'],
-      classes: ['3ème A', '4ème B', '5ème B'],
-      role: 'teacher',
-      updatedAt: new Date().toISOString(),
-    }
   ];
 
   try {

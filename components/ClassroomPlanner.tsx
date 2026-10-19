@@ -1,6 +1,6 @@
 
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { StudentPlacement, StudentLocation, SavedLayout, ActivePlan, Student, Group, StudentCPSProfile } from '../types';
 import StudentBank from './StudentBank';
@@ -37,6 +37,9 @@ import {
   reassignPublishedPlanClass,
   duplicatePublishedPlanForClass,
   duplicatePlanToPeriod,
+  filterPlansForOwner,
+  getActivePlanOwner,
+  enrichPlacementsWithPhotos,
   STANDARD_PERIODS,
   PublishedPlan
 } from '../services/planSharingService';
@@ -47,7 +50,7 @@ import {
 import { ObstaclePickerModal } from './ObstaclePickerModal';
 import { PRESET_OBSTACLES } from '../services/obstacleService';
 import { StudentPhotoModal, PhotoModalData } from './StudentPhotoModal';
-import { saveStudentPhoto, deleteStudentPhoto } from '../services/photoLibraryService';
+import { saveStudentPhoto, deleteStudentPhoto, getStudentPhoto } from '../services/photoLibraryService';
 
 
 interface ClassroomPlannerProps {
@@ -174,7 +177,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
     setSelectedPlanToReassignClass(null);
     setReassignClassInputValue('');
     const fresh = await getPublishedPlans();
-    setPublishedPlansList(fresh);
+    setAllPublishedPlans(fresh);
   };
 
   const handleDuplicateDbPlanForClass = async (planId: string, newClass: string) => {
@@ -183,7 +186,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
     setSelectedPlanToReassignClass(null);
     setReassignClassInputValue('');
     const fresh = await getPublishedPlans();
-    setPublishedPlansList(fresh);
+    setAllPublishedPlans(fresh);
   };
 
   // Room Layout without students state
@@ -244,13 +247,14 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
   };
 
   // Publishing & Cloud Sync state
-  const [teacherName, setTeacherName] = useState(plan.teacherName || 'M. Abgrall');
+  const [teacherName, setTeacherName] = useState(plan.teacherName || '');
   const [periodName, setPeriodName] = useState(plan.periodName || 'Trimestre 1 - 2026');
   const [selectedPublishPeriods, setSelectedPublishPeriods] = useState<string[]>(['Trimestre 1 - 2026']);
   const [allowSelfPlacement, setAllowSelfPlacement] = useState(true);
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
   const [publishSuccessMsg, setPublishSuccessMsg] = useState<string | null>(null);
-  const [publishedPlansList, setPublishedPlansList] = useState<PublishedPlan[]>([]);
+  const [allPublishedPlans, setAllPublishedPlans] = useState<PublishedPlan[]>([]);
+  const publishedPlansList = useMemo(() => filterPlansForOwner(allPublishedPlans, getActivePlanOwner()), [allPublishedPlans]);
   const [isPublishing, setIsPublishing] = useState(false);
   const [selectedPlanToManagePasswords, setSelectedPlanToManagePasswords] = useState<string | null>(null);
   const [selectedPlanToDuplicatePeriod, setSelectedPlanToDuplicatePeriod] = useState<string | null>(null);
@@ -304,7 +308,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
   // Subscribe to real-time published plans in Firestore
   React.useEffect(() => {
     const unsubscribe = subscribeToPublishedPlans((plans) => {
-      setPublishedPlansList(plans);
+      setAllPublishedPlans(plans);
     });
 
     // Safely reconcile local plans once in the background after planner mounts
@@ -3483,11 +3487,11 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
             onClose={() => setPlannerPhotoModalData(null)}
             onDeletePhoto={async (name) => {
               await deleteStudentPhoto(name);
-              setStudents((prev) => prev.map((s) => (s.name === name ? { ...s, photoUrl: undefined } : s)));
+              setAllStudents((prev) => prev.map((s) => (s.name === name ? { ...s, photoUrl: undefined } : s)));
             }}
             onReplacePhoto={async (name, newPhotoUrl) => {
               await saveStudentPhoto(name, newPhotoUrl, targetClasses[0] || undefined);
-              setStudents((prev) => prev.map((s) => (s.name === name ? { ...s, photoUrl: newPhotoUrl } : s)));
+              setAllStudents((prev) => prev.map((s) => (s.name === name ? { ...s, photoUrl: newPhotoUrl } : s)));
               setPlannerPhotoModalData((prev) => (prev ? { ...prev, photoUrl: newPhotoUrl } : null));
             }}
           />
