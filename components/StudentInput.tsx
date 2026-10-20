@@ -2463,7 +2463,11 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
 
         {/* Classes Multi-Select Chips */}
         {isAdmin && currentTeacher && allTeachersList.length > 0 && (
-          <OrphanPlansPanel teachers={allTeachersList} currentUid={currentTeacher.uid} />
+          <OrphanPlansPanel
+            teachers={allTeachersList}
+            currentUid={currentTeacher.uid}
+            onTeachersChanged={() => fetchAllTeachersForAdmin().then(t => t && setAllTeachersList(t))}
+          />
         )}
 
         <div className="space-y-3 pt-2 border-t border-slate-100 dark:border-slate-700/60">

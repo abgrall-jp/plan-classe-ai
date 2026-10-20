@@ -53,7 +53,7 @@ const adminDb = databaseId === "(default)" ? getAdminFirestore(adminApp) : getAd
 const ADMIN_EMAILS = String(process.env.ADMIN_EMAILS || "alimatlea@gmail.com")
   .split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
 
-const APP_VERSION = "2026-10-20.3";
+const APP_VERSION = "2026-10-20.4";
 const PLANS = "publishedPlans";
 const SECRETS = "planSecrets";
 const TEACHERS = "teachers";
@@ -842,11 +842,44 @@ app.get("/api/admin/orphan-plans", requireAdmin(), async (_req, res) => {
     adminDb.collection(TEACHERS).select().get(),
   ]);
   const known = new Set(teachers.docs.map(d => d.id));
-  res.json({
-    plans: snap.docs
-      .filter(d => { const id = String(d.data().teacherId || ""); return !id || !known.has(id); })
-      .map(d => ({ id: d.id, ...d.data() })),
+  const plans = snap.docs
+    .filter(d => { const id = String(d.data().teacherId || ""); return !id || !known.has(id); })
+    .map(d => ({ id: d.id, ...d.data() }) as any);
+  // Comptes qui ont publié des plans mais n'ont pas de fiche enseignant (anciens comptes AI Studio).
+  const accounts = new Map<string, string>();
+  for (const p of plans) if (p.teacherId && !accounts.has(p.teacherId)) accounts.set(p.teacherId, String(p.teacherName || "Enseignant"));
+  res.json({ plans, accountsWithoutProfile: Array.from(accounts, ([id, name]) => ({ id, name })) });
+});
+
+// Crée la fiche enseignant d'un compte qui n'en a pas, à partir du nom écrit sur ses plans.
+app.post("/api/admin/create-profile", requireAdmin(), async (req, res) => {
+  const teacherId = String(req.body?.teacherId || "");
+  const name = String(req.body?.name || "").trim().slice(0, 80);
+  if (!isSafeId(teacherId) || !name) return res.status(400).json({ error: "Compte ou nom invalide." });
+  const ref = adminDb.doc(`${TEACHERS}/${teacherId}`);
+  if ((await ref.get()).exists) return res.status(409).json({ error: "Ce profil existe déjà." });
+  const used = await adminDb.collection(PLANS).where("teacherId", "==", teacherId).limit(1).get();
+  if (used.empty) return res.status(404).json({ error: "Aucun plan n'est lié à ce compte." });
+  const civ = name.match(/^(M\.?|Mme\.?|Mr\.?|Madame|Monsieur)\s+/i);
+  const email = String(used.docs[0].data().teacherEmail || "");
+  await ref.set({
+    uid: teacherId, email,
+    firstName: civ ? civ[1] : "", lastName: civ ? name.slice(civ[0].length) : name,
+    disciplines: [], classes: [], role: "teacher", updatedAt: new Date().toISOString(),
   });
+  teacherNames.delete(teacherId);
+  directoryCache = null;
+  res.json({ success: true });
+});
+
+// Supprime un ancien plan (test, doublon). Les élèves et les parents ne le verront plus.
+app.post("/api/admin/delete-plan", requireAdmin(), async (req, res) => {
+  const planId = String(req.body?.planId || "");
+  if (!isSafeId(planId)) return res.status(400).json({ error: "Plan invalide." });
+  await adminDb.doc(`${PLANS}/${planId}`).delete();
+  await adminDb.doc(`${SECRETS}/${planId}`).delete();
+  directoryCache = null;
+  res.json({ success: true });
 });
 
 app.post("/api/admin/assign-plan", requireAdmin(), async (req, res) => {

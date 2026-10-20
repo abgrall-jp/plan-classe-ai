@@ -18,18 +18,19 @@ function guessTeacher(plan: OrphanPlan, teachers: TeacherAccount[], fallbackUid:
  * Administrateur : plans repris de l'ancienne application sans enseignant propriétaire.
  * Tant qu'ils ne sont pas rattachés, les élèves et les parents ne peuvent pas les ouvrir.
  */
-export default function OrphanPlansPanel({ teachers, currentUid, onAssigned }: {
+export default function OrphanPlansPanel({ teachers, currentUid, onTeachersChanged }: {
   teachers: TeacherAccount[];
   currentUid: string;
-  onAssigned?: () => void;
+  onTeachersChanged?: () => void;
 }) {
   const [plans, setPlans] = useState<OrphanPlan[] | null>(null);
+  const [accounts, setAccounts] = useState<{ id: string; name: string }[]>([]);
   const [choice, setChoice] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = () => apiFetch<{ plans: OrphanPlan[] }>('/api/admin/orphan-plans')
-    .then(r => setPlans(r.plans || []))
+  const load = () => apiFetch<{ plans: OrphanPlan[]; accountsWithoutProfile?: { id: string; name: string }[] }>('/api/admin/orphan-plans')
+    .then(r => { setPlans(r.plans || []); setAccounts(r.accountsWithoutProfile || []); })
     .catch(e => setError(e.message));
 
   useEffect(() => { load(); }, []);
@@ -38,18 +39,35 @@ export default function OrphanPlansPanel({ teachers, currentUid, onAssigned }: {
 
   const teacherFor = (p: OrphanPlan) => choice[p.id] || guessTeacher(p, teachers, currentUid);
 
-  const assign = async (list: OrphanPlan[]) => {
+  const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
     try {
-      for (const p of list) await apiFetch('/api/admin/assign-plan', { planId: p.id, teacherId: teacherFor(p) });
+      await action();
       await load();
-      onAssigned?.();
     } catch (e: any) {
       setError(e.message);
     } finally {
       setBusy(false);
     }
+  };
+
+  const assign = (list: OrphanPlan[]) => run(async () => {
+    for (const p of list) await apiFetch('/api/admin/assign-plan', { planId: p.id, teacherId: teacherFor(p) });
+  });
+
+  const createProfile = (a: { id: string; name: string }) => {
+    const name = window.prompt("Nom de l'enseignant tel qu'il s'affichera pour les élèves :", a.name);
+    if (!name || !name.trim()) return;
+    run(async () => {
+      await apiFetch('/api/admin/create-profile', { teacherId: a.id, name: name.trim() });
+      onTeachersChanged?.();
+    });
+  };
+
+  const remove = (p: OrphanPlan) => {
+    if (!window.confirm(`Supprimer définitivement le plan « ${p.className || '?'} · ${p.period || 'sans période'} » ?`)) return;
+    run(() => apiFetch('/api/admin/delete-plan', { planId: p.id }));
   };
 
   return (
@@ -61,6 +79,7 @@ export default function OrphanPlansPanel({ teachers, currentUid, onAssigned }: {
           </p>
           <p className="text-amber-900 dark:text-amber-200">
             Les élèves et les parents ne les voient pas. Choisissez à qui ils appartiennent puis rattachez-les.
+            Un plan de test ou en double peut être supprimé avec 🗑️. Un plan dont l'enseignant n'a pas encore de compte peut attendre ici.
           </p>
         </div>
         <button
@@ -72,6 +91,26 @@ export default function OrphanPlansPanel({ teachers, currentUid, onAssigned }: {
           {busy ? 'Rattachement…' : 'Tout rattacher'}
         </button>
       </div>
+      {accounts.length > 0 && (
+        <div className="p-3 rounded-xl bg-white/70 dark:bg-slate-900/60 border border-amber-200 dark:border-amber-800 space-y-2">
+          <p className="font-bold text-amber-950 dark:text-amber-100">
+            Ces enseignants ont un compte mais pas encore de profil. Créez-le pour pouvoir leur rattacher leurs plans :
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {accounts.map(a => (
+              <button
+                key={a.id}
+                type="button"
+                disabled={busy}
+                onClick={() => createProfile(a)}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-lg"
+              >
+                ➕ Créer le profil de {a.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       <ul className="space-y-2">
         {plans.map(p => (
           <li key={p.id} className="flex flex-wrap items-center gap-2 p-2 rounded-xl bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-800">
@@ -97,6 +136,15 @@ export default function OrphanPlansPanel({ teachers, currentUid, onAssigned }: {
                 className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold rounded-lg"
               >
                 Rattacher
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => remove(p)}
+                title="Supprimer ce plan (test ou doublon)"
+                className="px-2 py-1 bg-red-100 hover:bg-red-200 dark:bg-red-950 dark:hover:bg-red-900 text-red-800 dark:text-red-200 disabled:opacity-50 font-bold rounded-lg"
+              >
+                🗑️
               </button>
             </span>
           </li>
