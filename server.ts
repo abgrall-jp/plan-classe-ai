@@ -53,7 +53,7 @@ const adminDb = databaseId === "(default)" ? getAdminFirestore(adminApp) : getAd
 const ADMIN_EMAILS = String(process.env.ADMIN_EMAILS || "alimatlea@gmail.com")
   .split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
 
-const APP_VERSION = "2026-10-20.4";
+const APP_VERSION = "2026-10-20.5";
 const PLANS = "publishedPlans";
 const SECRETS = "planSecrets";
 const TEACHERS = "teachers";
@@ -838,13 +838,27 @@ app.post("/api/admin/billing/grant", requireAdmin(), async (req, res) => {
 // Sont aussi listés les plans rattachés à un compte qui n'a pas (ou plus) de fiche enseignant.
 app.get("/api/admin/orphan-plans", requireAdmin(), async (_req, res) => {
   const [snap, teachers] = await Promise.all([
-    adminDb.collection(PLANS).select("teacherName", "className", "period", "teacherId", "updatedAt").get(),
+    adminDb.collection(PLANS).select("teacherName", "className", "period", "teacherId", "updatedAt", "createdAt", "placements").get(),
     adminDb.collection(TEACHERS).select().get(),
   ]);
   const known = new Set(teachers.docs.map(d => d.id));
+  // Date lisible quel que soit son format d'origine (texte, horodatage Firestore ou nombre).
+  const isoDate = (v: any): string => {
+    if (!v) return "";
+    if (typeof v.toDate === "function") return v.toDate().toISOString();
+    const t = typeof v === "number" ? v : Date.parse(String(v));
+    return Number.isFinite(t) ? new Date(t).toISOString() : "";
+  };
   const plans = snap.docs
     .filter(d => { const id = String(d.data().teacherId || ""); return !id || !known.has(id); })
-    .map(d => ({ id: d.id, ...d.data() }) as any);
+    .map(d => {
+      const p = d.data();
+      return {
+        id: d.id, teacherId: p.teacherId || "", teacherName: p.teacherName || "", className: p.className || "",
+        period: p.period || "", updatedAt: isoDate(p.updatedAt) || isoDate(p.createdAt),
+        studentCount: placementsOf(p).length,
+      } as any;
+    });
   // Comptes qui ont publié des plans mais n'ont pas de fiche enseignant (anciens comptes AI Studio).
   const accounts = new Map<string, string>();
   for (const p of plans) if (p.teacherId && !accounts.has(p.teacherId)) accounts.set(p.teacherId, String(p.teacherName || "Enseignant"));

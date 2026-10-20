@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { apiFetch } from '../services/api';
 import type { TeacherAccount } from '../services/teacherAuthService';
 
-interface OrphanPlan { id: string; teacherName?: string; className?: string; period?: string; updatedAt?: string }
+interface OrphanPlan { id: string; teacherName?: string; className?: string; period?: string; updatedAt?: string; studentCount?: number }
 
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 
@@ -34,6 +34,16 @@ export default function OrphanPlansPanel({ teachers, currentUid, onTeachersChang
     .catch(e => setError(e.message));
 
   useEffect(() => { load(); }, []);
+
+  // Les doublons (même classe, même période) se suivent, le plus récent en premier.
+  const dupKey = (p: OrphanPlan) => `${norm(String(p.className || ''))}|${norm(String(p.period || ''))}`;
+  const sorted = [...(plans || [])].sort((a, b) =>
+    dupKey(a).localeCompare(dupKey(b), 'fr') || String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  const groupSize = new Map<string, number>();
+  sorted.forEach(p => groupSize.set(dupKey(p), (groupSize.get(dupKey(p)) || 0) + 1));
+  const formatDate = (iso?: string) => iso
+    ? new Date(iso).toLocaleString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : 'date inconnue';
 
   if (!plans || plans.length === 0) return error ? <p className="text-xs text-red-600">{error}</p> : null;
 
@@ -112,12 +122,26 @@ export default function OrphanPlansPanel({ teachers, currentUid, onTeachersChang
         </div>
       )}
       <ul className="space-y-2">
-        {plans.map(p => (
+        {sorted.map((p, i) => (
           <li key={p.id} className="flex flex-wrap items-center gap-2 p-2 rounded-xl bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-800">
             <span className="font-bold text-slate-900 dark:text-white min-w-0">
               Classe {p.className || '?'} · {p.period || 'sans période'}
             </span>
             <span className="text-slate-500 dark:text-slate-400">écrit « {p.teacherName || 'sans nom'} »</span>
+            <span className="text-slate-600 dark:text-slate-300">
+              · {p.studentCount ?? 0} élève(s) · modifié le {formatDate(p.updatedAt)}
+            </span>
+            {(groupSize.get(dupKey(p)) || 0) > 1 && (
+              i === 0 || dupKey(sorted[i - 1]) !== dupKey(p) ? (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-200 font-bold">
+                  Doublon : le plus récent
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold">
+                  Doublon plus ancien
+                </span>
+              )
+            )}
             <span className="flex items-center gap-1 ml-auto">
               <span className="text-slate-600 dark:text-slate-300">à :</span>
               <select
