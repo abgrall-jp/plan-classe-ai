@@ -329,7 +329,17 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async
 
 app.use(express.json({ limit: "25mb" }));
 
-app.get("/api/health", (_req, res) => { res.json({ status: "ok" }); });
+app.get("/api/health", async (req, res) => {
+  if (req.query.db === undefined) return res.json({ status: "ok" });
+  // Diagnostic d'installation : la clé du serveur est-elle trouvée, et la base répond-elle ?
+  const cle = process.env.FIREBASE_SERVICE_ACCOUNT ? "variable FIREBASE_SERVICE_ACCOUNT" : serviceAccount ? "fichier service-account.json" : "introuvable";
+  try {
+    await adminDb.collection(PLANS).limit(1).get();
+    res.json({ status: "ok", cle, base: databaseId, acces: "ok" });
+  } catch (e: any) {
+    res.json({ status: "erreur", cle, base: databaseId, dossier: process.cwd(), acces: String(e?.message || e).slice(0, 300) });
+  }
+});
 
 // --- Annuaire des espaces élève et parents -------------------------------------------------
 // Enseignants, classes et périodes publiées, sans aucun nom d'élève ni mot de passe.
