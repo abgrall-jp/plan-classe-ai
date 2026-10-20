@@ -53,6 +53,7 @@ const adminDb = databaseId === "(default)" ? getAdminFirestore(adminApp) : getAd
 const ADMIN_EMAILS = String(process.env.ADMIN_EMAILS || "alimatlea@gmail.com")
   .split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
 
+const APP_VERSION = "2026-10-20.3";
 const PLANS = "publishedPlans";
 const SECRETS = "planSecrets";
 const TEACHERS = "teachers";
@@ -334,10 +335,21 @@ app.get("/api/health", async (req, res) => {
   // Diagnostic d'installation : la clé du serveur est-elle trouvée, et la base répond-elle ?
   const cle = process.env.FIREBASE_SERVICE_ACCOUNT ? "variable FIREBASE_SERVICE_ACCOUNT" : serviceAccount ? "fichier service-account.json" : "introuvable";
   try {
-    await adminDb.collection(PLANS).limit(1).get();
-    res.json({ status: "ok", cle, base: databaseId, acces: "ok" });
+    const [plans, teachers] = await Promise.all([
+      adminDb.collection(PLANS).select("teacherId", "className").get(),
+      adminDb.collection(TEACHERS).select().get(),
+    ]);
+    const known = new Set(teachers.docs.map(d => d.id));
+    const ids = plans.docs.map(d => String(d.data().teacherId || ""));
+    res.json({
+      status: "ok", version: APP_VERSION, cle, base: databaseId, acces: "ok",
+      plans: plans.size,
+      plansSansEnseignant: ids.filter(id => !id).length,
+      plansEnseignantInconnu: ids.filter(id => id && !known.has(id)).length,
+      enseignants: teachers.size,
+    });
   } catch (e: any) {
-    res.json({ status: "erreur", cle, base: databaseId, dossier: process.cwd(), acces: String(e?.message || e).slice(0, 300) });
+    res.json({ status: "erreur", version: APP_VERSION, cle, base: databaseId, dossier: process.cwd(), acces: String(e?.message || e).slice(0, 300) });
   }
 });
 
@@ -823,10 +835,17 @@ app.post("/api/admin/billing/grant", requireAdmin(), async (req, res) => {
 });
 
 // Plans sans propriétaire (anciens plans) : liste et rattachement à un enseignant par l'administrateur.
+// Sont aussi listés les plans rattachés à un compte qui n'a pas (ou plus) de fiche enseignant.
 app.get("/api/admin/orphan-plans", requireAdmin(), async (_req, res) => {
-  const snap = await adminDb.collection(PLANS).select("teacherName", "className", "period", "teacherId", "updatedAt").get();
+  const [snap, teachers] = await Promise.all([
+    adminDb.collection(PLANS).select("teacherName", "className", "period", "teacherId", "updatedAt").get(),
+    adminDb.collection(TEACHERS).select().get(),
+  ]);
+  const known = new Set(teachers.docs.map(d => d.id));
   res.json({
-    plans: snap.docs.filter(d => !d.data().teacherId).map(d => ({ id: d.id, ...d.data() })),
+    plans: snap.docs
+      .filter(d => { const id = String(d.data().teacherId || ""); return !id || !known.has(id); })
+      .map(d => ({ id: d.id, ...d.data() })),
   });
 });
 
