@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import OrphanPlansPanel from './OrphanPlansPanel';
 import * as XLSX from 'xlsx';
 import { parseStudentList } from '../services/geminiService';
 import { Student, SavedLayout, StudentPlacement, StudentLocation } from '../types';
@@ -2461,6 +2462,10 @@ const StudentInput: React.FC<StudentInputProps> = ({ onStudentsParsed, onRestore
         )}
 
         {/* Classes Multi-Select Chips */}
+        {isAdmin && currentTeacher && allTeachersList.length > 0 && (
+          <OrphanPlansPanel teachers={allTeachersList} currentUid={currentTeacher.uid} />
+        )}
+
         <div className="space-y-3 pt-2 border-t border-slate-100 dark:border-slate-700/60">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
             <div>
