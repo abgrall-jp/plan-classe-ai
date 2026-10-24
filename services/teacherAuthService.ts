@@ -1,4 +1,5 @@
-import { auth, googleProvider, db } from '../lib/firebase';
+import { auth, googleProvider } from '../lib/firebase';
+import { apiEnseignant } from './api';
 import {
   signInWithPopup,
   signInWithEmailAndPassword,
@@ -7,14 +8,6 @@ import {
   onAuthStateChanged,
   User
 } from 'firebase/auth';
-import {
-  doc,
-  getDoc,
-  setDoc,
-  getDocs,
-  collection,
-  onSnapshot
-} from 'firebase/firestore';
 
 export interface TeacherAccount {
   uid: string;
@@ -28,7 +21,6 @@ export interface TeacherAccount {
   updatedAt: string;
 }
 
-const TEACHERS_COLLECTION = 'teachers';
 const LOCAL_AUTH_KEY = 'teacher_auth_account_v1';
 const IMPERSONATE_KEY = 'superadmin_impersonate_target_v1';
 
@@ -99,8 +91,11 @@ export const getLocalTeacherAccount = (): TeacherAccount | null => {
 export const syncTeacherProfileToFirestore = async (account: TeacherAccount): Promise<TeacherAccount> => {
   saveLocalTeacherAccount(account);
   try {
-    const docRef = doc(db, TEACHERS_COLLECTION, account.uid);
-    await setDoc(docRef, account, { merge: true });
+    // Le serveur garde le profil ; le rôle (administrateur ou non) est décidé par le serveur, jamais par le navigateur.
+    const soiMeme = account.uid === auth.currentUser?.uid;
+    await apiEnseignant('PUT', '/api/teacher/me', {
+      firstName: account.firstName, lastName: account.lastName, disciplines: account.disciplines, classes: account.classes, photoURL: account.photoURL,
+    }, soiMeme);
   } catch (err) {
     console.warn('Firestore teacher sync fallback:', err);
   }
@@ -113,24 +108,14 @@ export const fetchOrCreateTeacherProfile = async (
 ): Promise<TeacherAccount> => {
   const uid = firebaseUser.uid;
   const email = firebaseUser.email || '';
-  const isSuper = isSuperAdminEmail(email);
 
   try {
-    const docRef = doc(db, TEACHERS_COLLECTION, uid);
-    const snap = await getDoc(docRef);
-
-    if (snap.exists()) {
-      const data = snap.data() as TeacherAccount;
-      // Guarantee super_admin role if email is alimatlea@gmail.com
-      if (isSuper && data.role !== 'super_admin') {
-        data.role = 'super_admin';
-        await setDoc(docRef, { role: 'super_admin' }, { merge: true });
-      }
-      saveLocalTeacherAccount(data);
-      return data;
-    }
+    // Le serveur lit le profil, ou le crée au premier passage.
+    const data = await apiEnseignant<TeacherAccount>('GET', '/api/teacher/me', undefined, true);
+    saveLocalTeacherAccount(data);
+    return data;
   } catch (err) {
-    console.warn('Error reading teacher doc from Firestore, creating default:', err);
+    console.warn('Error reading teacher profile from server, creating default:', err);
   }
 
   const newProfile = createDefaultProfileForEmail(
@@ -253,9 +238,8 @@ export const fetchAllTeachersForAdmin = async (): Promise<TeacherAccount[]> => {
   ];
 
   try {
-    const snap = await getDocs(collection(db, TEACHERS_COLLECTION));
-    if (!snap.empty) {
-      const dbList = snap.docs.map(doc => doc.data() as TeacherAccount);
+    const dbList = await apiEnseignant<TeacherAccount[]>('GET', '/api/admin/teachers', undefined, true);
+    if (dbList.length) {
       // Merge dbList with defaultList ensuring no duplicates by uid
       const map = new Map<string, TeacherAccount>();
       defaultList.forEach(t => map.set(t.uid, t));

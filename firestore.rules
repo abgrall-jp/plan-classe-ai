@@ -1,15 +1,9 @@
 rules_version = '2';
+// Le navigateur n'accède plus jamais à la base : tout passe par le serveur (server.ts), qui utilise un compte de service.
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /publishedPlans/{planId} {
-      allow read, write: if true;
-    }
-    match /teachers/{teacherId} {
-      allow read, write: if true;
-    }
-    match /studentPhotos/{photoId} {
-      allow read, write: if true;
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
-

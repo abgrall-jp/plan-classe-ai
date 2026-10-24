@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   PublishedPlan,
-  subscribeToPublishedPlans,
-  verifyStudentPassword,
+  subscribeToPublicPlans,
+  loginToPlan,
+  logoutFromPlan,
+  getSessionPlan,
   updateStudentPassword,
   deduplicatePlacements
 } from '../services/planSharingService';
@@ -40,10 +42,11 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
 
   const [notification, setNotification] = useState<string | null>(null);
 
-  // Subscribe to real-time Firestore updates
+  // Subscribe to plan updates (relus régulièrement sur le serveur)
   useEffect(() => {
+    logoutFromPlan();
     setLoading(true);
-    const unsubscribe = subscribeToPublishedPlans((freshPlans) => {
+    const unsubscribe = subscribeToPublicPlans((freshPlans) => {
       syncPhotosFromLocalStorage();
       const photosToRegister: Array<{ name: string; photoUrl: string; className?: string }> = [];
       freshPlans.forEach(plan => {
@@ -135,21 +138,29 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
   };
 
   // Password submission handler
-  const handleVerifyPassword = (e: React.FormEvent) => {
+  // Le plan complet (photos de la classe, remarques de l'élève) n'arrive qu'après connexion.
+  const mettreAJourPlan = (complet: PublishedPlan | null | undefined) => {
+    if (!complet) return;
+    setPlans(prev => prev.map(p => (p.id === complet.id ? { ...complet, placements: deduplicatePlacements(complet.placements || []) } : p)));
+  };
+
+  const handleVerifyPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activePlan || selectedChildId === null) return;
 
     setPasswordError(null);
-    const { valid, requiresPasswordChange } = verifyStudentPassword(
-      activePlan,
+    const { valid, requiresPasswordChange, message } = await loginToPlan(
+      activePlan.id,
       selectedChildId,
-      passwordInput
+      passwordInput,
+      'parent'
     );
 
     if (!valid) {
-      setPasswordError("Mot de passe incorrect. (Par défaut : 0000)");
+      setPasswordError(message || "Mot de passe incorrect. (Par défaut : 0000)");
       return;
     }
+    mettreAJourPlan(await getSessionPlan());
 
     if (requiresPasswordChange) {
       setShowPasswordChangeModal(true);
@@ -189,6 +200,7 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
     );
 
     if (updatedPlan) {
+      mettreAJourPlan(updatedPlan);
       setShowPasswordChangeModal(false);
       setAuthChildId(selectedChildId);
       showToast("Mot de passe mis à jour avec succès ! Bienvenue.");
@@ -259,6 +271,7 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
                 setSelectedPlanId('');
                 setSelectedChildId(null);
                 setAuthChildId(null);
+                logoutFromPlan();
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-amber-500 focus:outline-none"
             >
@@ -284,6 +297,7 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
                 setSelectedPlanId('');
                 setSelectedChildId(null);
                 setAuthChildId(null);
+                logoutFromPlan();
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-amber-500 focus:outline-none disabled:opacity-50"
             >
@@ -308,6 +322,7 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
                 setSelectedPlanId(e.target.value);
                 setSelectedChildId(null);
                 setAuthChildId(null);
+                logoutFromPlan();
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-amber-500 focus:outline-none disabled:opacity-50"
             >
@@ -394,6 +409,7 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
                 <button
                   onClick={() => {
                     setAuthChildId(null);
+                logoutFromPlan();
                     setSelectedChildId(null);
                   }}
                   className="px-3 py-1 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 font-bold"

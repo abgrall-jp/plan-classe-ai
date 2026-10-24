@@ -2,9 +2,11 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { StudentPlacement } from '../types';
 import {
   PublishedPlan,
-  subscribeToPublishedPlans,
+  subscribeToPublicPlans,
+  loginToPlan,
+  logoutFromPlan,
+  getSessionPlan,
   updateStudentSeatInPlan,
-  verifyStudentPassword,
   updateStudentPassword,
   deduplicatePlacements,
   getStudentRemarks
@@ -67,10 +69,11 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
     return () => unsub();
   }, []);
 
-  // Subscribe to real-time Firestore updates
+  // Subscribe to plan updates (relus régulièrement sur le serveur)
   useEffect(() => {
+    logoutFromPlan();
     setLoading(true);
-    const unsubscribe = subscribeToPublishedPlans((freshPlans) => {
+    const unsubscribe = subscribeToPublicPlans((freshPlans) => {
       syncPhotosFromLocalStorage();
 
       // Collect and register all photos from incoming plans into the photo cache
@@ -181,21 +184,29 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
   };
 
   // Password submission handler
-  const handleVerifyPassword = (e: React.FormEvent) => {
+  // Le plan complet (photos de la classe, remarques de l'élève) n'arrive qu'après connexion.
+  const mettreAJourPlan = (complet: PublishedPlan | null | undefined) => {
+    if (!complet) return;
+    setPlans(prev => prev.map(p => (p.id === complet.id ? { ...complet, placements: deduplicatePlacements(complet.placements || []) } : p)));
+  };
+
+  const handleVerifyPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activePlan || selectedStudentId === null) return;
 
     setPasswordError(null);
-    const { valid, requiresPasswordChange } = verifyStudentPassword(
-      activePlan,
+    const { valid, requiresPasswordChange, message } = await loginToPlan(
+      activePlan.id,
       selectedStudentId,
-      passwordInput
+      passwordInput,
+      'student'
     );
 
     if (!valid) {
-      setPasswordError("Mot de passe incorrect. (Par défaut : 0000)");
+      setPasswordError(message || "Mot de passe incorrect. (Par défaut : 0000)");
       return;
     }
+    mettreAJourPlan(await getSessionPlan());
 
     if (requiresPasswordChange) {
       setShowPasswordChangeModal(true);
@@ -235,6 +246,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
     );
 
     if (updatedPlan) {
+      mettreAJourPlan(updatedPlan);
       setShowPasswordChangeModal(false);
       setAuthStudentId(selectedStudentId);
       showToast("Mot de passe mis à jour avec succès ! Bienvenue.");
@@ -264,6 +276,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
 
     const res = await updateStudentSeatInPlan(activePlan.id, authStudentId, cellIndex);
     if (res.success) {
+      mettreAJourPlan(res.plan);
       const st = activePlan.placements.find(p => p.id === authStudentId);
       showToast(`Bravo ${st?.name || ''} ! Ta place a été enregistrée à la table #${cellIndex + 1}.`);
     } else if (res.message) {
@@ -275,6 +288,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
     if (!activePlan || authStudentId === null) return;
     const res = await updateStudentSeatInPlan(activePlan.id, authStudentId, 'bank');
     if (res.success) {
+      mettreAJourPlan(res.plan);
       showToast("Ta place a été libérée.");
     }
   };
@@ -349,6 +363,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
                 setSelectedPlanId('');
                 setSelectedStudentId(null);
                 setAuthStudentId(null);
+                logoutFromPlan();
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0F17] px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
             >
@@ -374,6 +389,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
                 setSelectedPlanId('');
                 setSelectedStudentId(null);
                 setAuthStudentId(null);
+                logoutFromPlan();
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0F17] px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-emerald-500 focus:outline-none disabled:opacity-50"
             >
@@ -398,6 +414,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
                 setSelectedPlanId(e.target.value);
                 setSelectedStudentId(null);
                 setAuthStudentId(null);
+                logoutFromPlan();
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0B0F17] px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-emerald-500 focus:outline-none disabled:opacity-50"
             >
@@ -528,6 +545,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
                   <button
                     onClick={() => {
                       setAuthStudentId(null);
+                logoutFromPlan();
                       setSelectedStudentId(null);
                     }}
                     className="px-3.5 py-1.5 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-lg border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 font-bold text-xs shadow-xs cursor-pointer"

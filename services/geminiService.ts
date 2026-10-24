@@ -1,66 +1,15 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
-
-const getApiKey = (): string => {
-  return process.env.GEMINI_API_KEY || process.env.API_KEY || "";
-};
+import { apiEnseignant } from './api';
 
 export interface ParsedStudent {
   name: string;
   rollNumber?: string;
 }
 
+// L'analyse est faite par le serveur, qui garde la clé Gemini.
 export const parseStudentList = async (text: string): Promise<ParsedStudent[]> => {
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error("Clé d'API Gemini manquante. Veuillez vérifier la configuration de l'application.");
-  }
-
-  const ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3.7-flash",
-      contents: `Analyse la liste brute d'élèves suivante et extrait chaque élève sous forme d'objet structuré.
-Pour chaque élève, extrait :
-- "name" : Le nom complet de l'élève (conserve fidèlement les prénoms composés, noms de famille, accents et casse).
-- "rollNumber" : Le numéro d'appel ou rang éventuel de l'élève s'il est spécifié au début de ligne ou dans une colonne.
-
-Nettoie les puces, tirets, symboles inutiles ou en-têtes de colonnes (comme "Nom", "Prénom", "Numéro", "Élèves").
-Voici la liste brute à traiter :
-
-${text}`,
-      config: {
-        systemInstruction: "Tu es un extracteur de données d'élèves pour les enseignants. Tu dois extraire avec rigueur, rapidité et fidélité les noms et numéros des élèves sans inventer d'information.",
-        temperature: 0.1,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          description: "Tableau de tous les élèves extraits.",
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              name: {
-                type: Type.STRING,
-                description: "Nom complet de l'élève.",
-              },
-              rollNumber: {
-                type: Type.STRING,
-                description: "Numéro d'appel ou identifiant de l'élève.",
-              },
-            },
-            required: ['name'],
-          },
-        },
-      },
-    });
+    const response = await apiEnseignant<{ text: string }>('POST', '/api/gemini/students', { text });
 
     const jsonString = response.text ? response.text.trim() : "";
     if (!jsonString) {
