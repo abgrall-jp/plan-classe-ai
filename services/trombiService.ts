@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { apiEnseignant } from './api';
 import * as pdfjsLib from 'pdfjs-dist';
 
 // Configure pdfjs worker
@@ -8,10 +8,6 @@ try {
 } catch (e) {
   console.warn('Could not set pdfjs workerSrc:', e);
 }
-
-const getApiKey = (): string => {
-  return process.env.GEMINI_API_KEY || process.env.API_KEY || '';
-};
 
 export interface ExtractedTrombiStudent {
   name: string;
@@ -226,20 +222,6 @@ export const processMultiplePhotoFiles = async (
 export const extractTrombiWithGemini = async (
   canvas: HTMLCanvasElement
 ): Promise<TrombiExtractionResult> => {
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error("Clé d'API Gemini manquante. Veuillez vérifier la configuration de l'application.");
-  }
-
-  const ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
-
   // Convert canvas to base64 jpeg
   const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
   const base64Data = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
@@ -257,47 +239,8 @@ Extrait également s'ils existent :
 - "className" : le nom de la classe (ex: "SECONDE 3" ou "203").
 - "year" : l'année scolaire (ex: "2026 - 2027").`;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.8-flash',
-    contents: [
-      {
-        inlineData: {
-          mimeType: 'image/jpeg',
-          data: base64Data,
-        },
-      },
-      {
-        text: prompt,
-      },
-    ],
-    config: {
-      temperature: 0.1,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          className: { type: Type.STRING },
-          year: { type: Type.STRING },
-          students: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING },
-                box_2d: {
-                  type: Type.ARRAY,
-                  items: { type: Type.INTEGER },
-                },
-                isPlaceholder: { type: Type.BOOLEAN },
-              },
-              required: ['name', 'box_2d'],
-            },
-          },
-        },
-        required: ['students'],
-      },
-    },
-  });
+  // L'analyse est faite par le serveur, qui garde la clé Gemini.
+  const response = await apiEnseignant<{ text: string }>('POST', '/api/gemini/trombi', { image: base64Data, prompt });
 
   const jsonText = response.text ? response.text.trim() : '';
   if (!jsonText) {

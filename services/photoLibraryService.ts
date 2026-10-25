@@ -1,11 +1,11 @@
 import { normalizeStudentName } from './trombiService';
-import { db } from '../lib/firebase';
-import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch } from 'firebase/firestore';
+import { auth } from '../lib/firebase';
+import { onAuthStateChanged } from 'firebase/auth';
+import { apiEnseignant, enseignantConnecte } from './api';
 
 const DB_NAME = 'ClassroomSeatingPhotoLibrary';
 const DB_VERSION = 1;
 const STORE_NAME = 'photos';
-const CLOUD_COLLECTION_NAME = 'studentPhotos';
 
 export interface StoredPhotoRecord {
   key: string; // normalized student name
@@ -217,40 +217,34 @@ if (typeof window !== 'undefined') {
 let cloudPhotosUnsubscribe: (() => void) | null = null;
 
 /**
- * Real-time listener for student photos stored in Cloud Firestore.
- * Automatically loads all photos on any client (teacher, student, parent).
+ * Photos de l'enseignant connecté, gardées sur le serveur (relues toutes les minutes).
+ * Les élèves et les parents reçoivent les photos de leur classe avec le plan, après connexion.
  */
 export const subscribeToCloudPhotos = (): (() => void) => {
   if (typeof window === 'undefined') return () => {};
   if (cloudPhotosUnsubscribe) return cloudPhotosUnsubscribe;
-  try {
-    const colRef = collection(db, CLOUD_COLLECTION_NAME);
-    cloudPhotosUnsubscribe = onSnapshot(
-      colRef,
-      (snapshot) => {
-        if (!snapshot.empty) {
-          snapshot.docs.forEach((docSnap) => {
-            const data = docSnap.data();
-            if (data && data.key && data.photoUrl && typeof data.photoUrl === 'string') {
-              photoCache.set(data.key, data.photoUrl);
-              const cleanTokens = (data.name || data.key).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
-              if (cleanTokens.length >= 2) {
-                photoCache.set(cleanTokens.slice().sort().join(' '), data.photoUrl);
-              }
-            }
-          });
-          notifyListeners();
+  const lire = async () => {
+    if (!enseignantConnecte()) return;
+    try {
+      const photos = await apiEnseignant<Array<{ key: string; name: string; photoUrl: string }>>('GET', '/api/photos');
+      photos.forEach((data) => {
+        if (data && data.key && data.photoUrl && typeof data.photoUrl === 'string') {
+          photoCache.set(data.key, data.photoUrl);
+          const cleanTokens = (data.name || data.key).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+          if (cleanTokens.length >= 2) {
+            photoCache.set(cleanTokens.slice().sort().join(' '), data.photoUrl);
+          }
         }
-      },
-      (err) => {
-        console.warn('Cloud photos listener fallback:', err);
-      }
-    );
-    return cloudPhotosUnsubscribe;
-  } catch (err) {
-    console.warn('Cloud photos setup fallback:', err);
-    return () => {};
-  }
+      });
+      if (photos.length) notifyListeners();
+    } catch (err) {
+      console.warn('Cloud photos fallback:', err);
+    }
+  };
+  const stopAuth = onAuthStateChanged(auth, (u) => { if (u) lire(); });
+  const id = setInterval(lire, 60000);
+  cloudPhotosUnsubscribe = () => { stopAuth(); clearInterval(id); cloudPhotosUnsubscribe = null; };
+  return cloudPhotosUnsubscribe;
 };
 
 // Start cloud photo sync immediately in browser
@@ -504,17 +498,9 @@ export const saveStudentPhoto = async (
     console.warn('Failed to save photo to IndexedDB:', err);
   }
 
-  // Persist to Cloud Firestore so all students and online browsers have instant access
+  // Persist on the server (teacher only) so the teacher's other browsers and the class plan have it
   try {
-    const docKey = key.replace(/[^a-z0-9]/g, '_');
-    const docRef = doc(db, CLOUD_COLLECTION_NAME, docKey);
-    await setDoc(docRef, {
-      key,
-      name: name.trim(),
-      photoUrl: compressedWebp,
-      className: className || '',
-      updatedAt: new Date().toISOString(),
-    });
+    if (enseignantConnecte()) await apiEnseignant('PUT', '/api/photos', [{ name: name.trim(), photoUrl: compressedWebp, className: className || '' }]);
   } catch (err) {
     console.warn('Failed to save photo to Cloud Firestore:', err);
   }
@@ -643,10 +629,9 @@ export const deleteStudentPhoto = async (name: string): Promise<void> => {
     console.warn('Failed to delete photo from IndexedDB:', err);
   }
 
-  // Delete from Cloud Firestore
+  // Delete on the server (teacher only)
   try {
-    const docKey = key.replace(/[^a-z0-9]/g, '_');
-    await deleteDoc(doc(db, CLOUD_COLLECTION_NAME, docKey));
+    if (enseignantConnecte()) await apiEnseignant('DELETE', `/api/photos/${encodeURIComponent(key)}`);
   } catch (err) {
     console.warn('Failed to delete photo from Cloud Firestore:', err);
   }
@@ -708,25 +693,12 @@ export const registerPhotosBatch = async (
     console.warn('Batch save to IndexedDB error:', err);
   }
 
-  // Persist batch to Cloud Firestore using writeBatch to avoid write queue exhaustion
+  // Persist batch on the server (teacher only ; in the student and parent portals, photos stay in this browser)
   try {
-    if (compressedEntries.length > 0) {
-      const CHUNK_SIZE = 200;
+    if (compressedEntries.length > 0 && enseignantConnecte()) {
+      const CHUNK_SIZE = 100;
       for (let i = 0; i < compressedEntries.length; i += CHUNK_SIZE) {
-        const chunk = compressedEntries.slice(i, i + CHUNK_SIZE);
-        const batch = writeBatch(db);
-        chunk.forEach((rec) => {
-          const docKey = rec.key.replace(/[^a-z0-9]/g, '_');
-          const docRef = doc(db, CLOUD_COLLECTION_NAME, docKey);
-          batch.set(docRef, {
-            key: rec.key,
-            name: rec.name,
-            photoUrl: rec.photoUrl,
-            className: rec.className || '',
-            updatedAt: new Date().toISOString(),
-          });
-        });
-        await batch.commit();
+        await apiEnseignant('PUT', '/api/photos', compressedEntries.slice(i, i + CHUNK_SIZE).map(rec => ({ name: rec.name, photoUrl: rec.photoUrl, className: rec.className || '' })));
       }
     }
   } catch (err) {

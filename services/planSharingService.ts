@@ -1,15 +1,7 @@
 import { StudentPlacement, StudentPeriodRemark, PublishedPlan } from '../types';
 export type { StudentPeriodRemark, PublishedPlan };
-import { db, handleFirestoreError } from '../lib/firebase';
-import {
-  collection,
-  doc,
-  setDoc,
-  getDocs,
-  onSnapshot,
-  deleteDoc,
-  writeBatch
-} from 'firebase/firestore';
+import { handleFirestoreError } from '../lib/firebase';
+import { apiEnseignant, apiPublic, enseignantConnecte, ecrireSessionPortail, lireSessionPortail } from './api';
 import { getStudentPhoto } from './photoLibraryService';
 import { getImpersonatedTeacher, getLocalTeacherAccount } from './teacherAuthService';
 
@@ -142,6 +134,22 @@ export const cleanForFirestore = <T>(obj: T): T => {
 };
 
 const COLLECTION_NAME = 'publishedPlans';
+
+// Enregistrement d'un plan par le serveur (qui vérifie qu'il appartient à l'enseignant connecté).
+// Sans connexion enseignant (mode local), l'appel échoue et le plan reste dans ce navigateur.
+const putPlan = async (plan: PublishedPlan): Promise<void> => {
+  if (!plan?.id || plan.id.startsWith('demo-')) throw new Error('Plan de démonstration : enregistré dans ce navigateur seulement.');
+  await apiEnseignant('PUT', `/api/plans/${encodeURIComponent(plan.id)}`, cleanForFirestore(plan));
+};
+
+const plansDuServeur = async (): Promise<PublishedPlan[] | null> => {
+  if (!enseignantConnecte()) return null;
+  const list = await apiEnseignant<PublishedPlan[]>('GET', '/api/plans');
+  return list.map(data => ({
+    ...data,
+    placements: enrichPlacementsWithPhotos(deduplicatePlacements(data.placements || []))
+  })).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+};
 const LOCAL_STORAGE_KEY = 'plan_de_classe_published_plans_v3';
 
 // Default initial demo plans for immediate preview
@@ -241,54 +249,35 @@ const saveLocalPlans = (plans: PublishedPlan[]) => {
   }
 };
 
-// Real-time listener for all published plans
+// Plans de l'enseignant, relus toutes les 5 secondes (les élèves qui choisissent leur place apparaissent en direct).
 export const subscribeToPublishedPlans = (
   onData: (plans: PublishedPlan[]) => void
 ) => {
-  try {
-    const colRef = collection(db, COLLECTION_NAME);
-    return onSnapshot(
-      colRef,
-      (snapshot) => {
-        if (!snapshot.empty) {
-          const plans = snapshot.docs.map(docSnap => {
-            const data = docSnap.data() as PublishedPlan;
-            return {
-              ...data,
-              placements: enrichPlacementsWithPhotos(deduplicatePlacements(data.placements || []))
-            };
-          });
-          plans.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-          saveLocalPlans(plans);
-          onData(plans);
-        } else {
-          onData(getLocalPlans());
-        }
-      },
-      (error) => {
-        handleFirestoreError(error, 'list', COLLECTION_NAME);
-        onData(getLocalPlans());
+  let actif = true;
+  const lire = async () => {
+    try {
+      const plans = await plansDuServeur();
+      if (!actif) return;
+      if (plans && plans.length) {
+        saveLocalPlans(plans);
+        onData(plans);
+      } else {
+        onData(plans ? [] : getLocalPlans());
       }
-    );
-  } catch (err) {
-    handleFirestoreError(err, 'list', COLLECTION_NAME);
-    onData(getLocalPlans());
-    return () => {};
-  }
+    } catch (error) {
+      handleFirestoreError(error, 'list', COLLECTION_NAME);
+      if (actif) onData(getLocalPlans());
+    }
+  };
+  lire();
+  const id = setInterval(() => { if (document.visibilityState === 'visible') lire(); }, 5000);
+  return () => { actif = false; clearInterval(id); };
 };
 
 export const getPublishedPlans = async (): Promise<PublishedPlan[]> => {
   try {
-    const snapshot = await getDocs(collection(db, COLLECTION_NAME));
-    if (!snapshot.empty) {
-      const plans = snapshot.docs.map(docSnap => {
-        const data = docSnap.data() as PublishedPlan;
-        return {
-          ...data,
-          placements: enrichPlacementsWithPhotos(deduplicatePlacements(data.placements || []))
-        };
-      });
-      plans.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    const plans = await plansDuServeur();
+    if (plans) {
       saveLocalPlans(plans);
       return plans;
     }
@@ -315,13 +304,11 @@ export const reconcileLocalPlansToFirestore = async (): Promise<void> => {
     if (!Array.isArray(localPlans) || localPlans.length === 0) return;
 
     // Check remote docs first to avoid unnecessary writes
-    const snapshot = await getDocs(collection(db, COLLECTION_NAME));
+    const remotePlans = await plansDuServeur();
+    if (!remotePlans) return;
     const remotePlanMap = new Map<string, PublishedPlan>();
-    snapshot.forEach(docSnap => {
-      remotePlanMap.set(docSnap.id, docSnap.data() as PublishedPlan);
-    });
+    remotePlans.forEach(p => remotePlanMap.set(p.id, p));
 
-    const batch = writeBatch(db);
     let count = 0;
 
     for (const plan of localPlans) {
@@ -345,14 +332,9 @@ export const reconcileLocalPlansToFirestore = async (): Promise<void> => {
         placements: enrichedPlacements,
       };
 
-      const docRef = doc(db, COLLECTION_NAME, plan.id);
-      batch.set(docRef, cleanForFirestore(enrichedPlan), { merge: true });
+      await putPlan(enrichedPlan);
       count++;
       if (count >= 100) break;
-    }
-
-    if (count > 0) {
-      await batch.commit();
     }
   } catch (err) {
     console.warn('[Firestore] reconcileLocalPlansToFirestore error:', err);
@@ -476,8 +458,7 @@ export const savePublishedPlan = async (
   };
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, targetId);
-    await setDoc(docRef, cleanForFirestore(newRecord));
+    await putPlan(newRecord);
   } catch (e) {
     console.warn('Firestore save error, saving to local:', e);
   }
@@ -502,8 +483,7 @@ export const toggleFreezePlan = async (planId: string, isFrozen: boolean): Promi
   plan.updatedAt = new Date().toISOString();
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore freeze update error:', e);
     const local = getLocalPlans();
@@ -525,8 +505,7 @@ export const togglePastPlan = async (planId: string, isPast: boolean): Promise<P
   plan.updatedAt = new Date().toISOString();
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore toggle past plan error:', e);
     const local = getLocalPlans();
@@ -592,8 +571,7 @@ export const syncClassRosterWithCurrentPlans = async (
       };
 
       try {
-        const docRef = doc(db, COLLECTION_NAME, newPlanId);
-        await setDoc(docRef, cleanForFirestore(newPlanRecord));
+        await putPlan(newPlanRecord);
       } catch (e) {
         console.warn('Firestore sync auto-create plan error:', e);
       }
@@ -713,8 +691,7 @@ export const syncClassRosterWithCurrentPlans = async (
     };
 
     try {
-      const docRef = doc(db, COLLECTION_NAME, plan.id);
-      await setDoc(docRef, cleanForFirestore(updatedPlanRecord));
+      await putPlan(updatedPlanRecord);
     } catch (e) {
       console.warn('Firestore sync error, saving local:', e);
       const local = getLocalPlans();
@@ -737,8 +714,7 @@ export const reassignPublishedPlanClass = async (planId: string, newClassName: s
   plan.updatedAt = new Date().toISOString();
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore reassign class error:', e);
     const local = getLocalPlans();
@@ -770,8 +746,7 @@ export const duplicatePublishedPlanForClass = async (planId: string, newClassNam
   };
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, newId);
-    await setDoc(docRef, cleanForFirestore(duplicatedPlan));
+    await putPlan(duplicatedPlan);
   } catch (e) {
     console.warn('Firestore duplicate plan error:', e);
     const local = getLocalPlans();
@@ -784,7 +759,7 @@ export const duplicatePublishedPlanForClass = async (planId: string, newClassNam
 
 export const deletePublishedPlan = async (id: string): Promise<void> => {
   try {
-    await deleteDoc(doc(db, COLLECTION_NAME, id));
+    if (enseignantConnecte()) await apiEnseignant('DELETE', `/api/plans/${encodeURIComponent(id)}`);
   } catch (e) {
     console.warn('Firestore delete error:', e);
   }
@@ -801,8 +776,7 @@ export const updatePlanPeriod = async (planId: string, newPeriod: string): Promi
   plan.updatedAt = new Date().toISOString();
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore update period error:', e);
     const local = getLocalPlans();
@@ -828,8 +802,7 @@ export const clearPlanPlacements = async (planId: string): Promise<PublishedPlan
   plan.updatedAt = new Date().toISOString();
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore clear placements error:', e);
     const local = getLocalPlans();
@@ -870,8 +843,7 @@ export const fillPlanPlacements = async (planId: string): Promise<PublishedPlan 
   plan.updatedAt = new Date().toISOString();
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore fill placements error:', e);
     const local = getLocalPlans();
@@ -896,8 +868,7 @@ export const updatePlanGridDimensions = async (
   plan.updatedAt = new Date().toISOString();
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore update grid dimensions error:', e);
     const local = getLocalPlans();
@@ -910,54 +881,16 @@ export const updatePlanGridDimensions = async (
 };
 
 export const updateStudentSeatInPlan = async (
-  planId: string,
-  studentId: number,
+  _planId: string,
+  _studentId: number,
   newLocation: number | 'bank'
 ): Promise<{ success: boolean; plan?: PublishedPlan; message?: string }> => {
-  const currentPlans = await getPublishedPlans();
-  const plan = currentPlans.find(p => p.id === planId);
-  if (!plan) return { success: false, message: 'Plan introuvable' };
-
-  if (plan.isFrozen) {
-    return { success: false, message: 'Ce plan est figé par l’enseignant. Les modifications ne sont pas autorisées.' };
-  }
-
-  if (!plan.allowStudentSelfPlacement) {
-    return { success: false, message: 'Le placement libre est désactivé par l’enseignant.' };
-  }
-
-  // Seat conflicts resolution
-  if (typeof newLocation === 'number') {
-    const occupant = plan.placements.find(p => p.location === newLocation && p.id !== studentId);
-    if (occupant) {
-      const previousSeatOfStudent = plan.placements.find(p => p.id === studentId)?.location;
-      occupant.location = previousSeatOfStudent || 'bank';
-    }
-  }
-
-  plan.placements = enrichPlacementsWithPhotos(
-    plan.placements.map(p => {
-      if (p.id === studentId) {
-        return { ...p, location: newLocation };
-      }
-      return p;
-    })
-  );
-
-  plan.updatedAt = new Date().toISOString();
-
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
-  } catch (e) {
-    console.warn('Firestore update seat error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
+    const plan = await apiPublic<PublishedPlan>('POST', '/api/public/seat', { location: newLocation });
+    return { success: true, plan };
+  } catch (e: any) {
+    return { success: false, message: e?.message || 'Place non enregistrée.' };
   }
-
-  return { success: true, plan };
 };
 
 /**
@@ -1005,8 +938,7 @@ export const moveStudentByTeacher = async (
 
   // Write directly to Firestore
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore live teacher move error:', e);
   }
@@ -1034,8 +966,7 @@ export const updatePlanPlacementsByTeacher = async (
   saveLocalPlans(local);
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore live teacher update placements error:', e);
   }
@@ -1079,8 +1010,7 @@ export const updatePlanObstaclesByTeacher = async (
   saveLocalPlans(local);
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore live teacher update obstacles error:', e);
   }
@@ -1088,60 +1018,73 @@ export const updatePlanObstaclesByTeacher = async (
   return { success: true, plan };
 };
 
-// Verify student / parent password
-export const verifyStudentPassword = (
-  plan: PublishedPlan,
-  studentId: number,
-  inputPass: string
-): { valid: boolean; requiresPasswordChange: boolean } => {
-  const passwords = plan.studentPasswords || {};
-  const entry = passwords[studentId] || { password: '0000', isDefault: true };
+// --- Portail élève et parent : tout est vérifié par le serveur ---------------------------------
 
-  const targetPassword = entry.password || '0000';
-  const trimmedInput = inputPass.trim();
-
-  const isValid = trimmedInput === targetPassword;
-
-  // If password is default '0000' OR entry.isDefault is true, prompt for mandatory change
-  const requiresPasswordChange = isValid && (entry.isDefault || targetPassword === '0000');
-
-  return { valid: isValid, requiresPasswordChange };
+/** Plans visibles de tous (salle et prénoms, sans photos ni remarques), et le plan complet de l'élève ou du parent connecté. */
+export const subscribeToPublicPlans = (
+  onData: (plans: PublishedPlan[]) => void
+) => {
+  let actif = true;
+  const lire = async () => {
+    try {
+      const plans = await apiPublic<PublishedPlan[]>('GET', '/api/public/plans');
+      const session = lireSessionPortail();
+      let liste = plans;
+      if (session) {
+        try {
+          const complet = await apiPublic<PublishedPlan>('GET', '/api/public/session');
+          liste = plans.map(p => (p.id === complet.id ? complet : p));
+        } catch (err: any) {
+          if (err?.status === 401 || err?.status === 404) ecrireSessionPortail(null);
+        }
+      }
+      if (actif) onData(liste.map(p => ({ ...p, placements: deduplicatePlacements(p.placements || []) })).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()));
+    } catch (error) {
+      console.warn('Plans publics indisponibles :', error);
+      if (actif) onData([]);
+    }
+  };
+  lire();
+  const id = setInterval(() => { if (document.visibilityState === 'visible') lire(); }, 8000);
+  return () => { actif = false; clearInterval(id); };
 };
 
-// Change student password from default 0000 to custom password
-export const updateStudentPassword = async (
+/** Connexion de l'élève (ou du parent) avec son mot de passe. */
+export const loginToPlan = async (
   planId: string,
   studentId: number,
+  inputPass: string,
+  role: 'student' | 'parent' = 'student'
+): Promise<{ valid: boolean; requiresPasswordChange: boolean; message?: string }> => {
+  try {
+    const r = await apiPublic<{ token: string; requiresPasswordChange: boolean }>('POST', '/api/public/login', { planId, studentId, password: inputPass, role });
+    ecrireSessionPortail({ token: r.token, planId, studentId, role });
+    return { valid: true, requiresPasswordChange: r.requiresPasswordChange };
+  } catch (err: any) {
+    return { valid: false, requiresPasswordChange: false, message: err?.message };
+  }
+};
+
+export const logoutFromPlan = () => ecrireSessionPortail(null);
+
+/** Le plan complet de l'élève ou du parent connecté (photos de la classe, ses remarques). */
+export const getSessionPlan = async (): Promise<PublishedPlan | null> => {
+  try { return await apiPublic<PublishedPlan>('GET', '/api/public/session'); } catch { return null; }
+};
+
+// Change student password from default 0000 to custom password (élève ou parent connecté)
+export const updateStudentPassword = async (
+  _planId: string,
+  _studentId: number,
   newPass: string
 ): Promise<PublishedPlan | null> => {
-  const currentPlans = await getPublishedPlans();
-  const plan = currentPlans.find(p => p.id === planId);
-  if (!plan) return null;
-
-  if (!plan.studentPasswords) {
-    plan.studentPasswords = {};
-  }
-
-  plan.studentPasswords[studentId] = {
-    password: newPass.trim(),
-    isDefault: false,
-    updatedAt: new Date().toISOString(),
-  };
-
-  plan.updatedAt = new Date().toISOString();
-
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await apiPublic('POST', '/api/public/password', { newPassword: newPass.trim() });
+    return await getSessionPlan();
   } catch (e) {
-    console.warn('Firestore update password error:', e);
-    const local = getLocalPlans();
-    const idx = local.findIndex(p => p.id === planId);
-    if (idx >= 0) local[idx] = plan;
-    saveLocalPlans(local);
+    console.warn('Changement de mot de passe impossible :', e);
+    return null;
   }
-
-  return plan;
 };
 
 // Teacher action: reset a student password back to '0000'
@@ -1166,8 +1109,7 @@ export const resetStudentPasswordToDefault = async (
   plan.updatedAt = new Date().toISOString();
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore password reset error:', e);
     const local = getLocalPlans();
@@ -1303,8 +1245,7 @@ export const saveStudentRemark = async (
   plan.updatedAt = now;
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore remark save error:', e);
     const local = getLocalPlans();
@@ -1341,8 +1282,7 @@ export const deleteStudentRemark = async (
   plan.updatedAt = new Date().toISOString();
 
   try {
-    const docRef = doc(db, COLLECTION_NAME, planId);
-    await setDoc(docRef, cleanForFirestore(plan));
+    await putPlan(plan);
   } catch (e) {
     console.warn('Firestore remark delete error:', e);
     const local = getLocalPlans();

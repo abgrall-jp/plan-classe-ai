@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Clé du serveur : ne jamais publier
+service-account.json
+.env
