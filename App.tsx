@@ -11,9 +11,28 @@ import { AppLogo } from './components/AppLogo';
 import { RgpdLogo } from './components/RgpdLogo';
 import { RgpdComplianceModal } from './components/RgpdComplianceModal';
 import { QuotaNotificationBanner } from './components/QuotaNotificationBanner';
+import { SAVE_ERROR_EVENT } from './lib/firebase';
 
-export const APP_VERSION = "2.2.0";
-export const LAST_PUBLICATION_DATE = "18 septembre 2026";
+/** Bandeau affiché quand un enregistrement en ligne échoue (au lieu de perdre le travail sans le dire). */
+const SaveErrorBanner: React.FC = () => {
+  const [message, setMessage] = useState<string | null>(null);
+  useEffect(() => {
+    const onError = (e: Event) => setMessage(String((e as CustomEvent).detail || 'Enregistrement impossible.'));
+    window.addEventListener(SAVE_ERROR_EVENT, onError);
+    return () => window.removeEventListener(SAVE_ERROR_EVENT, onError);
+  }, []);
+  if (!message) return null;
+  return (
+    <div role="alert" className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] max-w-xl w-[calc(100%-2rem)] bg-red-700 text-white px-4 py-3 rounded-xl shadow-2xl text-sm font-semibold flex items-start gap-3">
+      <span>⚠️</span>
+      <span className="flex-1">Le dernier changement n'a pas été enregistré en ligne. {message}</span>
+      <button type="button" onClick={() => setMessage(null)} className="font-black opacity-80 hover:opacity-100" aria-label="Fermer">✕</button>
+    </div>
+  );
+};
+
+export const APP_VERSION = "3.0.0";
+export const LAST_PUBLICATION_DATE = "19 octobre 2026";
 
 export type UserRole = 'home' | 'student' | 'teacher' | 'parent';
 
@@ -77,19 +96,20 @@ const App: React.FC = () => {
   return (
     <div className="flex flex-col min-h-screen bg-slate-50 dark:bg-[#0B0F17] text-slate-800 dark:text-slate-100 transition-colors duration-200">
       <QuotaNotificationBanner />
-      <header className="bg-white/90 dark:bg-[#0E1524]/90 backdrop-blur-md shadow-sm dark:shadow-2xl dark:shadow-black/40 border-b border-slate-200 dark:border-slate-800/80 sticky top-0 z-20">
+      <SaveErrorBanner />
+      <header className="bg-white/90 dark:bg-[#0E1524]/90 backdrop-blur-md shadow-sm dark:shadow-2xl dark:shadow-black/40 border-b border-slate-200 dark:border-slate-800/80 lg:sticky lg:top-0 z-20">
         <div className="container mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col sm:flex-row items-center justify-between h-auto sm:h-16 py-3 sm:py-0 gap-3">
+          <div className="flex flex-col lg:flex-row items-center justify-between h-auto lg:h-16 py-3 lg:py-0 gap-3">
             
             {/* Logo & Application Title */}
             <div
               onClick={() => setCurrentRole('home')}
-              className="flex items-center space-x-3 cursor-pointer group"
+              className="flex items-center space-x-3 cursor-pointer group shrink-0"
               title="Retour à l'accueil"
             >
               <AppLogo size="sm" showText={false} />
               <div>
-                <h1 className="text-lg sm:text-xl font-extrabold tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
+                <h1 className="text-lg sm:text-xl font-extrabold tracking-tight text-slate-900 dark:text-white flex items-center gap-2 whitespace-nowrap">
                   Plan de Classe <span className="bg-gradient-to-r from-indigo-400 via-purple-400 to-cyan-400 bg-clip-text text-transparent">IA</span>
                   {currentRole !== 'home' && (
                     <span className="text-[11px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider bg-indigo-100 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
@@ -101,7 +121,7 @@ const App: React.FC = () => {
             </div>
 
             {/* Navigation Role Selector, RGPD Badge & Teacher Steps */}
-            <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+            <div className="flex flex-wrap items-center justify-center gap-2 text-xs font-semibold">
               <button
                 type="button"
                 onClick={() => setCurrentRole('home')}
@@ -168,7 +188,7 @@ const App: React.FC = () => {
                         : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700'
                     }`}
                   >
-                    1. Liste
+                    ← Mon espace
                   </button>
                   <button
                     type="button"
@@ -179,7 +199,7 @@ const App: React.FC = () => {
                         : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700'
                     }`}
                   >
-                    2. Réglages
+                    Salle
                   </button>
                   <button
                     type="button"
@@ -190,7 +210,7 @@ const App: React.FC = () => {
                         : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700'
                     }`}
                   >
-                    3. Visu
+                    Placement
                   </button>
                 </div>
               )}

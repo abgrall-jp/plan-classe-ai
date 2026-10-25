@@ -8,31 +8,6 @@
     <meta name="description" content="Une application pour générer et optimiser un plan de classe interactif avec Gemini 3.7. Importez ou collez vos listes d'élèves, notes et affinités pour organiser visuellement et automatiquement votre classe en toute conformité RGPD." />
     <meta property="og:title" content="Plan de Classe IA - Gestion Pédagogique & Optimisation" />
     <meta property="og:description" content="Générez et optimisez vos plans de classe de manière intelligente et sécurisée, en conformité avec la réglementation RGPD et les préconisations CNIL Éducation." />
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-      tailwind.config = {
-        darkMode: 'class',
-        theme: {
-          extend: {
-            colors: {
-              studio: {
-                950: '#070A10',
-                900: '#0B0F17',
-                850: '#0E1524',
-                800: '#131B2E',
-                700: '#1E293B',
-                600: '#334155',
-                accent: '#6366F1',
-                cyan: '#06B6D4',
-              }
-            },
-            fontFamily: {
-              sans: ['Inter', 'system-ui', 'sans-serif'],
-            }
-          }
-        }
-      }
-    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
@@ -41,20 +16,6 @@
         font-family: 'Inter', sans-serif;
       }
     </style>
-  <script type="importmap">
-{
-  "imports": {
-    "@google/genai": "https://esm.sh/@google/genai@^1.10.0",
-    "react-dom/": "https://esm.sh/react-dom@^19.1.0/",
-    "react/": "https://esm.sh/react@^19.1.0/",
-    "react": "https://esm.sh/react@^19.1.0",
-    "react-dnd-html5-backend": "https://esm.sh/react-dnd-html5-backend@^16.0.1",
-    "react-dnd": "https://esm.sh/react-dnd@^16.0.1",
-    "xlsx": "https://esm.sh/xlsx@^0.18.5"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
 </head>
   <body class="bg-[#0B0F17] text-slate-100 antialiased min-h-screen selection:bg-indigo-500/30 selection:text-indigo-200">
     <div id="root"></div>

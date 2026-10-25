@@ -23,6 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 
-# Clé du serveur : ne jamais publier
+# Secrets du serveur
 service-account.json
 .env

@@ -1,10 +1,13 @@
 import { initializeApp, getApps, getApp, type FirebaseApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, connectAuthEmulator } from 'firebase/auth';
-import appletConfig from '../firebase-applet-config.json';
+import { getFirestore, doc, getDocFromServer, connectFirestoreEmulator } from 'firebase/firestore';
+import { getAuth, GoogleAuthProvider, connectAuthEmulator, onAuthStateChanged, type User } from 'firebase/auth';
+import appletConfigFile from '../firebase-applet-config.json';
 
-// Le navigateur ne sert plus qu'à connecter les enseignants : les données passent par le serveur (/api).
-// La configuration est écrite dans la page par le serveur ; le fichier sert de secours (vite seul).
-const firebaseConfig = (window as any).__FIREBASE_CONFIG__ || appletConfig;
+// Sur o2switch, le serveur écrit les réglages dans la page (window.__FIREBASE_CONFIG__) : la base peut changer sans recompiler.
+const firebaseConfig: typeof appletConfigFile & { emulators?: { host: string; firestorePort: number; authPort: number } } = {
+  ...appletConfigFile,
+  ...((typeof window !== 'undefined' && (window as any).__FIREBASE_CONFIG__) || {}),
+};
 
 let app: FirebaseApp;
 if (getApps().length > 0) {
@@ -22,9 +25,43 @@ if (getApps().length > 0) {
 }
 
 export { app };
+export const db = firebaseConfig.firestoreDatabaseId
+  ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
+  : getFirestore(app);
+
 export const auth = getAuth(app);
-if (firebaseConfig.emulators?.authPort) connectAuthEmulator(auth, `http://${location.hostname}:${firebaseConfig.emulators.authPort}`, { disableWarnings: true });
+
+// Tests locaux uniquement : le serveur lancé avec USE_FIREBASE_EMULATORS=1 indique les émulateurs Firebase.
+if (firebaseConfig.emulators) {
+  const e = firebaseConfig.emulators;
+  connectAuthEmulator(auth, `http://${e.host}:${e.authPort}`, { disableWarnings: true });
+  connectFirestoreEmulator(db, e.host, e.firestorePort);
+}
 export const googleProvider = new GoogleAuthProvider();
+
+/** Attend que Firebase ait restauré la session (ou constaté qu'il n'y en a pas). */
+export const authReady: Promise<User | null> = new Promise(resolve => {
+  const unsub = onAuthStateChanged(auth, user => { unsub(); resolve(user); });
+});
+
+/** Adresse de l'administrateur (même règle que le serveur et les règles Firestore). */
+export const ADMIN_EMAIL = 'alimatlea@gmail.com';
+export const isAdminUser = (user: User | null | undefined) =>
+  !!user?.email && user.email.toLowerCase() === ADMIN_EMAIL && user.emailVerified !== false;
+
+// Échec d'enregistrement : l'application affiche un bandeau au lieu de se taire (voir SaveErrorBanner).
+export const SAVE_ERROR_EVENT = 'plan-classe-save-error';
+export const reportSaveError = (what: string, error: unknown) => {
+  console.warn(`[Enregistrement] ${what} :`, error);
+  handleFirestoreError(error, what);
+  if (typeof window !== 'undefined') {
+    const code = (error as any)?.code || '';
+    const detail = code === 'permission-denied'
+      ? "accès refusé (reconnectez-vous)"
+      : code === 'unavailable' ? 'pas de connexion Internet' : ((error as any)?.message || String(error));
+    window.dispatchEvent(new CustomEvent(SAVE_ERROR_EVENT, { detail: `${what} : ${detail}` }));
+  }
+};
 
 // Quota state and notification tracker
 let quotaExceededState = false;
@@ -71,16 +108,25 @@ export const handleFirestoreError = (error: unknown, operationType: string, path
   }
 };
 
-// Vérifie au démarrage que le serveur répond.
+// Test connection on boot according to Firebase Integration Skill
 export async function testConnection(): Promise<boolean> {
   try {
-    const r = await fetch('/api/health');
-    if (!r.ok) return false;
+    await getDocFromServer(doc(db, 'test', 'connection'));
     clearQuotaExceeded();
     return true;
-  } catch {
-    console.warn("Le serveur du Plan de classe ne répond pas.");
-    return false;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes('resource-exhausted') || msg.includes('Quota limit exceeded') || msg.includes('Quota exceeded')) {
+      markQuotaExceeded();
+      return false;
+    } else if (msg.includes('the client is offline')) {
+      console.warn("Please check your Firebase configuration or network.");
+      return false;
+    } else {
+      // If error is code "not-found" (document test/connection doesn't exist), that means Firestore responds fine!
+      clearQuotaExceeded();
+      return true;
+    }
   }
 }
-testConnection();
+
