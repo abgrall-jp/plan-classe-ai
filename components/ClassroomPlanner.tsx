@@ -130,19 +130,18 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
     if (plan.selectedClasses && plan.selectedClasses.length > 0) {
       return plan.selectedClasses;
     }
-    return ['3ème A'];
+    return [];
   });
   const [className, setClassName] = useState(() => {
     if (plan.selectedClasses && plan.selectedClasses.length > 0) {
       return plan.selectedClasses.join(', ');
     }
-    return '3ème A';
+    return '';
   });
 
   const teacherAccount = getImpersonatedTeacher() || getLocalTeacherAccount();
-  const teacherClasses = teacherAccount?.classes && teacherAccount.classes.length > 0
-    ? teacherAccount.classes
-    : ['3ème A', '3ème B', '4ème A', '4ème B', '5ème A', '5ème B', '6ème A', '6ème B', 'Option SNT'];
+  // Classes proposées : celles du profil de l'enseignant (et celles déjà choisies pour ce plan).
+  const teacherClasses = Array.from(new Set([...(teacherAccount?.classes || []), ...(plan.selectedClasses || [])]));
 
   const [newTargetClassInput, setNewTargetClassInput] = useState('');
   const [classAssignmentMsg, setClassAssignmentMsg] = useState<string | null>(null);
@@ -531,7 +530,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
     setPublishSuccessMsg(null);
     try {
       const existing = await getPublishedPlans();
-      setPublishedPlansList(existing);
+      setAllPublishedPlans(existing);
     } catch (e) {
       console.error(e);
     }
@@ -577,7 +576,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
     setPublishSuccessMsg(`✅ Plan publié avec succès (${count} publication(s)) pour ${classesList.join(', ')} sur la/les période(s) : ${targetPeriods.join(', ')} !`);
     
     const fresh = await getPublishedPlans();
-    setPublishedPlansList(fresh);
+    setAllPublishedPlans(fresh);
   };
 
   const handleDuplicateToPeriod = async (planToDup: PublishedPlan, targetPeriod: string) => {
@@ -587,7 +586,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
       setPublishSuccessMsg(`✅ Plan de ${planToDup.className} dupliqué avec succès vers la période "${targetPeriod.trim()}" !`);
       setSelectedPlanToDuplicatePeriod(null);
       const fresh = await getPublishedPlans();
-      setPublishedPlansList(fresh);
+      setAllPublishedPlans(fresh);
     } catch (e) {
       console.error(e);
       alert("Erreur lors de la duplication du plan.");
@@ -597,19 +596,19 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
   const handleToggleFreeze = async (planId: string, currentFreezeState: boolean) => {
     await toggleFreezePlan(planId, !currentFreezeState);
     const fresh = await getPublishedPlans();
-    setPublishedPlansList(fresh);
+    setAllPublishedPlans(fresh);
   };
 
   const handleDeletePlan = async (planId: string) => {
     await deletePublishedPlan(planId);
     const fresh = await getPublishedPlans();
-    setPublishedPlansList(fresh);
+    setAllPublishedPlans(fresh);
   };
 
   const handleResetPassword = async (planId: string, studentId: number, studentName: string) => {
     await resetStudentPasswordToDefault(planId, studentId);
     const fresh = await getPublishedPlans();
-    setPublishedPlansList(fresh);
+    setAllPublishedPlans(fresh);
     alert(`Le mot de passe de ${studentName} a été réinitialisé à 0000.`);
   };
 
@@ -914,7 +913,8 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
         handleSelectObstaclesForCells([cellId], obstacle);
     };
   
-  const handleSave = async () => {
+  // Copie du plan sur l'ordinateur (fichier .json), à recharger plus tard depuis l'Espace Enseignant.
+  const handleDownloadJson = () => {
       const layoutToSave: SavedLayout = {
           students: allStudents,
           placements: Array.from(placements.entries()),
@@ -933,8 +933,10 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
+  };
 
-      // Auto-save to Cloud Firestore so the plan is immediately published & visible to students
+  // Enregistrement en ligne : le plan est publié et visible des élèves de la classe.
+  const handleSave = async () => {
       try {
         const activePlacementsArray: StudentPlacement[] = Array.from(placements.values());
         const classesList = targetClasses.length > 0
@@ -943,7 +945,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
 
         for (const cName of classesList) {
           await savePublishedPlan({
-            teacherName: teacherName || 'M. / Mme Enseignant',
+            teacherName: teacherName || [teacherAccount?.firstName, teacherAccount?.lastName].filter(Boolean).join(' ') || 'Enseignant',
             className: cName || 'Classe sans nom',
             period: periodName || 'Période 1',
             allowStudentSelfPlacement: allowSelfPlacement,
@@ -955,9 +957,10 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
           });
         }
         const fresh = await getPublishedPlans();
-        setPublishedPlansList(fresh);
+        setAllPublishedPlans(fresh);
       } catch (e) {
         console.error("Cloud auto-save error:", e);
+        return;
       }
 
       setSaveConfirmation(true);
@@ -1721,7 +1724,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
 
             for (const cName of classesList) {
                 await savePublishedPlan({
-                    teacherName: teacherName || 'M. / Mme Enseignant',
+                    teacherName: teacherName || [teacherAccount?.firstName, teacherAccount?.lastName].filter(Boolean).join(' ') || 'Enseignant',
                     className: cName || 'Classe sans nom',
                     period: periodName || 'Période 1',
                     allowStudentSelfPlacement: true,
@@ -1732,7 +1735,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
                 });
             }
             const fresh = await getPublishedPlans();
-            setPublishedPlansList(fresh);
+            setAllPublishedPlans(fresh);
         } catch (e) {
             console.error("Cloud auto-save error on reset placement:", e);
         }
@@ -1949,7 +1952,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
                 <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-indigo-100 dark:bg-indigo-900">
                     <SettingsIcon className="h-6 w-6 text-indigo-600 dark:text-indigo-300" aria-hidden="true" />
                 </div>
-                <h2 className="mt-4 text-2xl font-bold text-slate-900 dark:text-white">Étape 2: Réglages et Contraintes</h2>
+                <h2 className="mt-4 text-2xl font-bold text-slate-900 dark:text-white">Réglages de la salle</h2>
                 <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
                     Ajustez les dimensions, importez des notes, et définissez des contraintes pour le placement automatique.
                 </p>
@@ -2169,7 +2172,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
                   onClick={() => setStep(3)}
                   className="w-full sm:w-auto px-5 py-3 bg-amber-400 hover:bg-amber-300 text-slate-950 font-black rounded-xl text-xs sm:text-sm shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer shrink-0"
                 >
-                  <span>🚀 Valider & Passer à l'Étape 3 (Visualisation) →</span>
+                  <span>Placer les élèves →</span>
                 </button>
               </div>
 
@@ -2836,7 +2839,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
                 <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-indigo-100 dark:bg-indigo-900">
                  <UserIcon className="h-6 w-6 text-indigo-600 dark:text-indigo-300" aria-hidden="true" />
                 </div>
-                <h2 className="mt-4 text-2xl font-bold text-slate-900 dark:text-white">Étape 3: Visualisation et Ajustements</h2>
+                <h2 className="mt-4 text-2xl font-bold text-slate-900 dark:text-white">Placer les élèves</h2>
                 <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
                     Glissez-déposez les élèves pour finaliser le plan. Cliquez sur une case vide pour la marquer comme indisponible.
                 </p>
@@ -2852,16 +2855,24 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
                             onClick={() => setStep(2)}
                             className="w-full flex items-center justify-center px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-700/50 border border-slate-300 dark:border-slate-600 rounded-md hover:bg-slate-50 dark:hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                         >
-                            &larr; Précédent (Réglages)
+                            &larr; Retour aux réglages de la salle
+                        </button>
+                        <button
+                            onClick={handleSave}
+                            disabled={saveConfirmation}
+                            title="Enregistre le plan en ligne : il est visible des élèves de la classe"
+                            className="w-full flex items-center justify-center px-4 py-2.5 text-sm font-bold text-white bg-indigo-600 rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors duration-200 disabled:bg-emerald-600 disabled:cursor-default"
+                        >
+                            {saveConfirmation ? '✓ Plan enregistré' : '💾 Enregistrer le plan'}
                         </button>
                         <div className="grid grid-cols-2 gap-2">
                           <button
-                              onClick={handleSave}
-                              disabled={saveConfirmation}
-                              className="w-full flex items-center justify-center px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors duration-200 disabled:bg-indigo-400 disabled:cursor-not-allowed"
+                              onClick={handleDownloadJson}
+                              title="Télécharger une copie du plan sur cet ordinateur"
+                              className="w-full flex items-center justify-center px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-700/50 border border-slate-300 dark:border-slate-600 rounded-md hover:bg-slate-50 dark:hover:bg-slate-700"
                           >
-                              <LoadIcon className="h-5 w-5 mr-2"/>
-                              {saveConfirmation ? 'Plan !' : 'Enregistrer'}
+                              <LoadIcon className="h-4 w-4 mr-1.5"/>
+                              Copie (.json)
                           </button>
                            <button
                               onClick={handleExportHtml}
@@ -3001,7 +3012,7 @@ const ClassroomPlanner: React.FC<ClassroomPlannerProps> = ({ plan, onReset, step
                           type="text"
                           value={teacherName}
                           onChange={(e) => setTeacherName(e.target.value)}
-                          placeholder="M. Abgrall"
+                          placeholder="Prénom Nom"
                           className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 dark:bg-slate-800 dark:text-white"
                         />
                       </div>

@@ -1,4 +1,6 @@
-import { apiEnseignant } from './api';
+import { generateAI } from './api';
+
+const Type = { OBJECT: 'OBJECT', ARRAY: 'ARRAY', STRING: 'STRING', INTEGER: 'INTEGER', BOOLEAN: 'BOOLEAN' } as const;
 import * as pdfjsLib from 'pdfjs-dist';
 
 // Configure pdfjs worker
@@ -8,6 +10,7 @@ try {
 } catch (e) {
   console.warn('Could not set pdfjs workerSrc:', e);
 }
+
 
 export interface ExtractedTrombiStudent {
   name: string;
@@ -239,10 +242,45 @@ Extrait également s'ils existent :
 - "className" : le nom de la classe (ex: "SECONDE 3" ou "203").
 - "year" : l'année scolaire (ex: "2026 - 2027").`;
 
-  // L'analyse est faite par le serveur, qui garde la clé Gemini.
-  const response = await apiEnseignant<{ text: string }>('POST', '/api/gemini/trombi', { image: base64Data, prompt });
+  const responseText = await generateAI([
+      {
+        inlineData: {
+          mimeType: 'image/jpeg',
+          data: base64Data,
+        },
+      },
+      {
+        text: prompt,
+      },
+    ], {
+      temperature: 0.1,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          className: { type: Type.STRING },
+          year: { type: Type.STRING },
+          students: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                name: { type: Type.STRING },
+                box_2d: {
+                  type: Type.ARRAY,
+                  items: { type: Type.INTEGER },
+                },
+                isPlaceholder: { type: Type.BOOLEAN },
+              },
+              required: ['name', 'box_2d'],
+            },
+          },
+        },
+        required: ['students'],
+      },
+    });
 
-  const jsonText = response.text ? response.text.trim() : '';
+  const jsonText = responseText.trim();
   if (!jsonText) {
     throw new Error("L'IA n'a retourné aucune réponse pour ce trombinoscope.");
   }

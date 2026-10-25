@@ -1,11 +1,24 @@
 import { normalizeStudentName } from './trombiService';
-import { auth } from '../lib/firebase';
+import { db, auth, isAdminUser } from '../lib/firebase';
+import { collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch, query, where } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
-import { apiEnseignant, enseignantConnecte } from './api';
+import { getImpersonatedTeacher, teacherStorageKey } from './teacherAuthService';
+
+/**
+ * Enseignant propriétaire des photos : celui que l'administrateur consulte, sinon le compte connecté.
+ * Chaque enseignant a sa propre bibliothèque (identifiant du document préfixé par son identifiant),
+ * lisible par lui seul : les élèves voient les photos dans le plan que le serveur leur renvoie.
+ */
+const photoOwnerUid = (): string | null => getImpersonatedTeacher()?.uid || auth.currentUser?.uid || null;
+const cloudDocId = (key: string): string | null => {
+  const uid = photoOwnerUid();
+  return uid ? `${uid}_${key.replace(/[^a-z0-9]/g, '_')}` : null;
+};
 
 const DB_NAME = 'ClassroomSeatingPhotoLibrary';
 const DB_VERSION = 1;
 const STORE_NAME = 'photos';
+const CLOUD_COLLECTION_NAME = 'studentPhotos';
 
 export interface StoredPhotoRecord {
   key: string; // normalized student name
@@ -56,7 +69,7 @@ export const syncPhotosFromLocalStorage = () => {
     };
 
     // 1. Sync from class_rosters_v2 (Teacher Class Manager primary store)
-    const rawRosters = localStorage.getItem('class_rosters_v2');
+    const rawRosters = localStorage.getItem(teacherStorageKey('class_rosters_v2'));
     if (rawRosters) {
       try {
         const rosters: Record<string, any[]> = JSON.parse(rawRosters);
@@ -75,7 +88,7 @@ export const syncPhotosFromLocalStorage = () => {
     }
 
     // 2. Sync from classroom_student_rosters
-    const rawOldRosters = localStorage.getItem('classroom_student_rosters');
+    const rawOldRosters = (null as string | null); // ancien stockage commun à tous les comptes : ignoré
     if (rawOldRosters) {
       try {
         const oldRosters: Record<string, any[]> = JSON.parse(rawOldRosters);
@@ -94,7 +107,7 @@ export const syncPhotosFromLocalStorage = () => {
     }
 
     // 3. Sync from plan_de_classe_published_plans_v3
-    const rawPlans = localStorage.getItem('plan_de_classe_published_plans_v3');
+    const rawPlans = (null as string | null); // ancien stockage commun à tous les comptes : ignoré
     if (rawPlans) {
       try {
         const plans: any[] = JSON.parse(rawPlans);
@@ -160,10 +173,9 @@ const getDb = async (): Promise<IDBDatabase | null> => {
       request.onsuccess = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
         isDbReady = true;
-        // Preload all photos into in-memory cache
-        preloadCacheFromDb(db).then(() => {
-          resolve(db);
-        });
+        // Plus de préchargement : ce stockage est commun à tous les comptes du navigateur.
+        // Les photos affichées viennent de la bibliothèque de l'enseignant connecté.
+        resolve(db);
       };
 
       request.onerror = (err) => {
@@ -217,39 +229,57 @@ if (typeof window !== 'undefined') {
 let cloudPhotosUnsubscribe: (() => void) | null = null;
 
 /**
- * Photos de l'enseignant connecté, gardées sur le serveur (relues toutes les minutes).
- * Les élèves et les parents reçoivent les photos de leur classe avec le plan, après connexion.
+ * Écoute en temps réel les photos de l'enseignant connecté (aucune photo pour un visiteur, un élève ou un parent).
  */
 export const subscribeToCloudPhotos = (): (() => void) => {
   if (typeof window === 'undefined') return () => {};
-  if (cloudPhotosUnsubscribe) return cloudPhotosUnsubscribe;
-  const lire = async () => {
-    if (!enseignantConnecte()) return;
-    try {
-      const photos = await apiEnseignant<Array<{ key: string; name: string; photoUrl: string }>>('GET', '/api/photos');
-      photos.forEach((data) => {
-        if (data && data.key && data.photoUrl && typeof data.photoUrl === 'string') {
-          photoCache.set(data.key, data.photoUrl);
-          const cleanTokens = (data.name || data.key).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
-          if (cleanTokens.length >= 2) {
-            photoCache.set(cleanTokens.slice().sort().join(' '), data.photoUrl);
-          }
+  cloudPhotosUnsubscribe?.();
+  cloudPhotosUnsubscribe = null;
+  const uid = photoOwnerUid();
+  const user = auth.currentUser;
+  if (!uid || !user?.email) return () => {};
+  try {
+    const colRef = isAdminUser(user) && !getImpersonatedTeacher()
+      ? query(collection(db, CLOUD_COLLECTION_NAME), where('teacherId', '==', user.uid))
+      : query(collection(db, CLOUD_COLLECTION_NAME), where('teacherId', '==', uid));
+    cloudPhotosUnsubscribe = onSnapshot(
+      colRef,
+      (snapshot) => {
+        if (!snapshot.empty) {
+          snapshot.docs.forEach((docSnap) => {
+            const data = docSnap.data();
+            if (data && data.key && data.photoUrl && typeof data.photoUrl === 'string') {
+              photoCache.set(data.key, data.photoUrl);
+              const cleanTokens = (data.name || data.key).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+              if (cleanTokens.length >= 2) {
+                photoCache.set(cleanTokens.slice().sort().join(' '), data.photoUrl);
+              }
+            }
+          });
+          notifyListeners();
         }
-      });
-      if (photos.length) notifyListeners();
-    } catch (err) {
-      console.warn('Cloud photos fallback:', err);
-    }
-  };
-  const stopAuth = onAuthStateChanged(auth, (u) => { if (u) lire(); });
-  const id = setInterval(lire, 60000);
-  cloudPhotosUnsubscribe = () => { stopAuth(); clearInterval(id); cloudPhotosUnsubscribe = null; };
-  return cloudPhotosUnsubscribe;
+      },
+      (err) => {
+        console.warn('Cloud photos listener fallback:', err);
+      }
+    );
+    return cloudPhotosUnsubscribe;
+  } catch (err) {
+    console.warn('Cloud photos setup fallback:', err);
+    return () => {};
+  }
 };
 
-// Start cloud photo sync immediately in browser
-if (typeof window !== 'undefined') {
+/** Relance l'écoute des photos quand l'enseignant change (connexion, déconnexion, consultation par l'administrateur). */
+export const refreshCloudPhotos = () => {
+  photoCache.clear();
+  syncPhotosFromLocalStorage();
   subscribeToCloudPhotos();
+  notifyListeners();
+};
+
+if (typeof window !== 'undefined') {
+  onAuthStateChanged(auth, () => refreshCloudPhotos());
 }
 
 /**
@@ -498,9 +528,19 @@ export const saveStudentPhoto = async (
     console.warn('Failed to save photo to IndexedDB:', err);
   }
 
-  // Persist on the server (teacher only) so the teacher's other browsers and the class plan have it
+  // Persist to Cloud Firestore so all students and online browsers have instant access
   try {
-    if (enseignantConnecte()) await apiEnseignant('PUT', '/api/photos', [{ name: name.trim(), photoUrl: compressedWebp, className: className || '' }]);
+    const docKey = cloudDocId(key);
+    if (!docKey) return compressedWebp;
+    const docRef = doc(db, CLOUD_COLLECTION_NAME, docKey);
+    await setDoc(docRef, {
+      teacherId: photoOwnerUid(),
+      key,
+      name: name.trim(),
+      photoUrl: compressedWebp,
+      className: className || '',
+      updatedAt: new Date().toISOString(),
+    });
   } catch (err) {
     console.warn('Failed to save photo to Cloud Firestore:', err);
   }
@@ -569,7 +609,7 @@ export const getStudentPhoto = (
   // 6. Dynamic fallback: Scan class_rosters_v2 in localStorage
   if (typeof window !== 'undefined' && key) {
     try {
-      const rawRosters = localStorage.getItem('class_rosters_v2');
+      const rawRosters = localStorage.getItem(teacherStorageKey('class_rosters_v2'));
       if (rawRosters) {
         const rosters: Record<string, any[]> = JSON.parse(rawRosters);
         const tokens = cleanName.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
@@ -629,9 +669,10 @@ export const deleteStudentPhoto = async (name: string): Promise<void> => {
     console.warn('Failed to delete photo from IndexedDB:', err);
   }
 
-  // Delete on the server (teacher only)
+  // Delete from Cloud Firestore
   try {
-    if (enseignantConnecte()) await apiEnseignant('DELETE', `/api/photos/${encodeURIComponent(key)}`);
+    const docKey = cloudDocId(key);
+    if (docKey) await deleteDoc(doc(db, CLOUD_COLLECTION_NAME, docKey));
   } catch (err) {
     console.warn('Failed to delete photo from Cloud Firestore:', err);
   }
@@ -693,12 +734,25 @@ export const registerPhotosBatch = async (
     console.warn('Batch save to IndexedDB error:', err);
   }
 
-  // Persist batch on the server (teacher only ; in the student and parent portals, photos stay in this browser)
+  // Persist batch to Cloud Firestore using writeBatch to avoid write queue exhaustion
   try {
-    if (compressedEntries.length > 0 && enseignantConnecte()) {
-      const CHUNK_SIZE = 100;
+    if (compressedEntries.length > 0 && photoOwnerUid()) {
+      const CHUNK_SIZE = 200;
       for (let i = 0; i < compressedEntries.length; i += CHUNK_SIZE) {
-        await apiEnseignant('PUT', '/api/photos', compressedEntries.slice(i, i + CHUNK_SIZE).map(rec => ({ name: rec.name, photoUrl: rec.photoUrl, className: rec.className || '' })));
+        const chunk = compressedEntries.slice(i, i + CHUNK_SIZE);
+        const batch = writeBatch(db);
+        chunk.forEach((rec) => {
+          const docRef = doc(db, CLOUD_COLLECTION_NAME, cloudDocId(rec.key)!);
+          batch.set(docRef, {
+            teacherId: photoOwnerUid(),
+            key: rec.key,
+            name: rec.name,
+            photoUrl: rec.photoUrl,
+            className: rec.className || '',
+            updatedAt: new Date().toISOString(),
+          });
+        });
+        await batch.commit();
       }
     }
   } catch (err) {

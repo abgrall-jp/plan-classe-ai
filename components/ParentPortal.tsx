@@ -1,14 +1,16 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { deduplicatePlacements } from '../services/planSharingService';
 import {
-  PublishedPlan,
-  subscribeToPublicPlans,
-  loginToPlan,
-  logoutFromPlan,
-  getSessionPlan,
-  updateStudentPassword,
-  deduplicatePlacements
-} from '../services/planSharingService';
-import { getStudentPhoto, syncPhotosFromLocalStorage, registerPhotosBatch } from '../services/photoLibraryService';
+  Directory,
+  PortalSession,
+  PortalStudent,
+  fetchDirectory,
+  fetchPlanStudents,
+  loadPortalSession,
+  portalLogin,
+  savePortalSession,
+  usePortalPlan,
+} from '../services/portalService';
 import { UserIcon } from './icons/UserIcon';
 import { GridIcon } from './icons/GridIcon';
 import { useSeatingColors, getSeatBorderStyle } from '../services/seatingColorService';
@@ -20,20 +22,29 @@ interface ParentPortalProps {
   onBackToHome: () => void;
 }
 
+// Seules les photos enregistrées dans le plan par l'enseignant s'affichent.
+const getStudentPhoto = (_name?: string, photoUrl?: string): string | undefined =>
+  photoUrl && photoUrl.trim() ? photoUrl : undefined;
+
+const splitClasses = (className: string) => className.split(',').map(c => c.trim()).filter(Boolean);
+const sameText = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
 export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
   const { colors } = useSeatingColors();
-  const [plans, setPlans] = useState<PublishedPlan[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [session, setSession] = useState<PortalSession | null>(() => loadPortalSession('parent'));
+  const [directory, setDirectory] = useState<Directory | null>(null);
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
+  const [planStudents, setPlanStudents] = useState<PortalStudent[]>([]);
+  const [busy, setBusy] = useState(false);
   const [photoModalData, setPhotoModalData] = useState<PhotoModalData | null>(null);
 
   // Selection state
-  const [selectedTeacher, setSelectedTeacher] = useState<string>('');
-  const [selectedClass, setSelectedClass] = useState<string>('');
-  const [selectedPlanId, setSelectedPlanId] = useState<string>('');
+  const [selectedTeacher, setSelectedTeacher] = useState<string>(session?.teacherId || '');
+  const [selectedClass, setSelectedClass] = useState<string>(session?.className || '');
+  const [selectedPlanId, setSelectedPlanId] = useState<string>(session?.planId || '');
   const [selectedChildId, setSelectedChildId] = useState<number | null>(null);
 
-  // Auth / Password state
-  const [authChildId, setAuthChildId] = useState<number | null>(null);
+  // Password state
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [showPasswordChangeModal, setShowPasswordChangeModal] = useState<boolean>(false);
@@ -42,71 +53,56 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
 
   const [notification, setNotification] = useState<string | null>(null);
 
-  // Subscribe to plan updates (relus régulièrement sur le serveur)
+  const showToast = (msg: string) => {
+    setNotification(msg);
+    setTimeout(() => setNotification(null), 3500);
+  };
+
+  const updateSession = (s: PortalSession | null) => {
+    savePortalSession('parent', s);
+    setSession(s);
+  };
+
+  const logout = () => {
+    updateSession(null);
+    setSelectedChildId(null);
+    setPasswordInput('');
+    setShowPasswordChangeModal(false);
+  };
+
+  // Le plan est rafraîchi moins souvent que dans l'espace élève : les parents ne changent pas les places.
+  const { plan: activePlan, error: planError } = usePortalPlan(session, () => {
+    logout();
+    showToast('La connexion a expiré : merci de vous reconnecter.');
+  }, 15000);
+
   useEffect(() => {
-    logoutFromPlan();
-    setLoading(true);
-    const unsubscribe = subscribeToPublicPlans((freshPlans) => {
-      syncPhotosFromLocalStorage();
-      const photosToRegister: Array<{ name: string; photoUrl: string; className?: string }> = [];
-      freshPlans.forEach(plan => {
-        if (Array.isArray(plan.placements)) {
-          plan.placements.forEach(p => {
-            if (p && p.name && p.photoUrl && typeof p.photoUrl === 'string' && p.photoUrl.trim()) {
-              photosToRegister.push({
-                name: p.name,
-                photoUrl: p.photoUrl,
-                className: plan.className,
-              });
-            }
-          });
-        }
-      });
-      if (photosToRegister.length > 0) {
-        registerPhotosBatch(photosToRegister).catch(console.warn);
-      }
-      setPlans(freshPlans);
-      setLoading(false);
-    });
-    return () => unsubscribe();
+    let alive = true;
+    fetchDirectory()
+      .then(d => { if (alive) setDirectory(d); })
+      .catch(e => { if (alive) setDirectoryError(e.message); });
+    return () => { alive = false; };
   }, []);
 
-  // Filter list of unique teachers
-  const teachers = useMemo(() => {
-    const list = Array.from(new Set(plans.map(p => p.teacherName.trim()))).filter(Boolean);
-    return list.sort();
-  }, [plans]);
+  const loading = !directory && !directoryError;
+  const teachers = directory?.teachers || [];
 
-  // Classes for selected teacher
   const classesForTeacher = useMemo(() => {
-    if (!selectedTeacher) return [];
+    if (!selectedTeacher || !directory) return [];
     const set = new Set<string>();
-    plans
-      .filter(p => p.teacherName.trim() === selectedTeacher)
-      .forEach(p => {
-        if (p.className) {
-          p.className.split(',').forEach(c => {
-            const trimmed = c.trim();
-            if (trimmed) set.add(trimmed);
-          });
-        }
-      });
-    return Array.from(set).sort();
-  }, [plans, selectedTeacher]);
+    directory.plans.filter(p => p.teacherId === selectedTeacher).forEach(p => splitClasses(p.className).forEach(c => set.add(c)));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'fr'));
+  }, [directory, selectedTeacher]);
 
-  // Plans available for teacher & class
   const availablePlans = useMemo(() => {
-    if (!selectedTeacher || !selectedClass) return [];
-    return plans.filter(p => {
-      const teacherMatch = p.teacherName.trim() === selectedTeacher;
-      const classList = p.className.split(',').map(c => c.trim());
-      const classMatch = classList.includes(selectedClass) || p.className.trim() === selectedClass;
-      return teacherMatch && classMatch;
-    });
-  }, [plans, selectedTeacher, selectedClass]);
+    if (!selectedTeacher || !selectedClass || !directory) return [];
+    return directory.plans
+      .filter(p => p.teacherId === selectedTeacher && splitClasses(p.className).some(c => sameText(c, selectedClass)))
+      .sort((a, b) => Number(a.isPast) - Number(b.isPast) || b.updatedAt.localeCompare(a.updatedAt));
+  }, [directory, selectedTeacher, selectedClass]);
 
-  // Auto-select available plan when available
   useEffect(() => {
+    if (!directory) return;
     if (availablePlans.length > 0) {
       if (!selectedPlanId || !availablePlans.some(p => p.id === selectedPlanId)) {
         setSelectedPlanId(availablePlans[0].id);
@@ -114,96 +110,112 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
     } else {
       setSelectedPlanId('');
     }
-  }, [availablePlans, selectedPlanId]);
+  }, [availablePlans, selectedPlanId, directory]);
 
-  // Active selected plan
-  const activePlan = useMemo(() => {
-    return plans.find(p => p.id === selectedPlanId) || null;
-  }, [plans, selectedPlanId]);
+  const selectedPlanMeta = useMemo(
+    () => availablePlans.find(p => p.id === selectedPlanId) || null,
+    [availablePlans, selectedPlanId]
+  );
 
-  // Active placements list (deduplicated)
-  const activePlacementsList = useMemo(() => {
-    if (!activePlan || !Array.isArray(activePlan.placements)) return [];
-    return deduplicatePlacements(activePlan.placements);
-  }, [activePlan]);
+  useEffect(() => {
+    if (session && selectedPlanId && selectedPlanId !== session.planId) {
+      updateSession({ ...session, planId: selectedPlanId });
+    }
+  }, [selectedPlanId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Children in selected plan
-  const childrenInPlan = useMemo(() => {
-    return activePlacementsList.slice().sort((a, b) => a.name.localeCompare(b.name));
-  }, [activePlacementsList]);
+  useEffect(() => {
+    setPlanStudents([]);
+    if (!selectedPlanId || session) return;
+    let alive = true;
+    fetchPlanStudents(selectedPlanId)
+      .then(list => { if (alive) setPlanStudents(list); })
+      .catch(e => { if (alive) showToast(e.message); });
+    return () => { alive = false; };
+  }, [selectedPlanId, session]);
 
-  const showToast = (msg: string) => {
-    setNotification(msg);
-    setTimeout(() => setNotification(null), 3500);
-  };
+  const childrenInPlan = useMemo(
+    () => planStudents.map(s => ({ ...s, photoUrl: undefined as string | undefined })),
+    [planStudents]
+  );
 
-  // Password submission handler
-  // Le plan complet (photos de la classe, remarques de l'élève) n'arrive qu'après connexion.
-  const mettreAJourPlan = (complet: PublishedPlan | null | undefined) => {
-    if (!complet) return;
-    setPlans(prev => prev.map(p => (p.id === complet.id ? { ...complet, placements: deduplicatePlacements(complet.placements || []) } : p)));
+  const authChildId: number | null = session && activePlan ? activePlan.myStudentId : null;
+
+  const activePlacementsList = useMemo(
+    () => (activePlan ? deduplicatePlacements(activePlan.placements || []) : []),
+    [activePlan]
+  );
+
+  const openSession = (token: string, student: { id: number; name: string }) => {
+    updateSession({
+      token,
+      planId: selectedPlanId,
+      studentId: student.id,
+      name: student.name,
+      teacherId: selectedTeacher,
+      className: selectedClass,
+    });
+    setShowPasswordChangeModal(false);
+    setPasswordInput('');
+    setNewPasswordInput('');
+    setConfirmPasswordInput('');
+    setPasswordError(null);
   };
 
   const handleVerifyPassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activePlan || selectedChildId === null) return;
-
+    if (!selectedPlanId || selectedChildId === null || busy) return;
     setPasswordError(null);
-    const { valid, requiresPasswordChange, message } = await loginToPlan(
-      activePlan.id,
-      selectedChildId,
-      passwordInput,
-      'parent'
-    );
-
-    if (!valid) {
-      setPasswordError(message || "Mot de passe incorrect. (Par défaut : 0000)");
-      return;
+    setBusy(true);
+    try {
+      const r = await portalLogin({ planId: selectedPlanId, studentId: selectedChildId, pin: passwordInput, role: 'parent' });
+      if (r.needsNewPin) {
+        setShowPasswordChangeModal(true);
+      } else if (r.token && r.student) {
+        openSession(r.token, r.student);
+        showToast('Connexion réussie !');
+      }
+    } catch (err: any) {
+      setPasswordError(err.message);
+    } finally {
+      setBusy(false);
     }
-    mettreAJourPlan(await getSessionPlan());
-
-    if (requiresPasswordChange) {
-      setShowPasswordChangeModal(true);
-      return;
-    }
-
-    // Auth Success
-    setAuthChildId(selectedChildId);
-    showToast("Connexion réussie !");
   };
 
-  // Save new custom password
   const handleChangePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activePlan || selectedChildId === null) return;
+    if (!selectedPlanId || selectedChildId === null || busy) return;
 
     if (newPasswordInput.trim().length < 4) {
-      setPasswordError("Le nouveau mot de passe doit comporter au moins 4 caractères.");
+      setPasswordError('Le nouveau mot de passe doit comporter au moins 4 caractères.');
       return;
     }
-
     if (newPasswordInput.trim() === '0000') {
-      setPasswordError("Veuillez choisir un mot de passe différent de 0000.");
+      setPasswordError('Choisissez un mot de passe différent de 0000.');
       return;
     }
-
     if (newPasswordInput.trim() !== confirmPasswordInput.trim()) {
-      setPasswordError("Les mots de passe ne correspondent pas.");
+      setPasswordError('Les deux mots de passe ne sont pas identiques.');
       return;
     }
 
     setPasswordError(null);
-    const updatedPlan = await updateStudentPassword(
-      activePlan.id,
-      selectedChildId,
-      newPasswordInput.trim()
-    );
-
-    if (updatedPlan) {
-      mettreAJourPlan(updatedPlan);
-      setShowPasswordChangeModal(false);
-      setAuthChildId(selectedChildId);
-      showToast("Mot de passe mis à jour avec succès ! Bienvenue.");
+    setBusy(true);
+    try {
+      const r = await portalLogin({
+        planId: selectedPlanId,
+        studentId: selectedChildId,
+        pin: passwordInput,
+        newPin: newPasswordInput.trim(),
+        role: 'parent',
+      });
+      if (r.token && r.student) {
+        openSession(r.token, r.student);
+        showToast('Mot de passe enregistré. Bienvenue !');
+      }
+    } catch (err: any) {
+      setPasswordError(err.message);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -219,9 +231,9 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
   }, [activePlacementsList]);
 
   const authenticatedChildObj = useMemo(() => {
-    if (!activePlan || authChildId === null) return null;
+    if (authChildId === null) return null;
     return activePlacementsList.find(p => p.id === authChildId) || null;
-  }, [activePlan, authChildId, activePlacementsList]);
+  }, [authChildId, activePlacementsList]);
 
   return (
     <div className="max-w-6xl mx-auto p-4 sm:p-6 space-y-6">
@@ -270,15 +282,14 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
                 setSelectedClass('');
                 setSelectedPlanId('');
                 setSelectedChildId(null);
-                setAuthChildId(null);
-                logoutFromPlan();
+                if (session) logout();
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-amber-500 focus:outline-none"
             >
               <option value="">-- Choisir l'enseignant --</option>
               {teachers.map((t) => (
-                <option key={t} value={t}>
-                  👨‍🏫 {t}
+                <option key={t.id} value={t.id}>
+                  👨‍🏫 {t.name}
                 </option>
               ))}
             </select>
@@ -296,8 +307,7 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
                 setSelectedClass(e.target.value);
                 setSelectedPlanId('');
                 setSelectedChildId(null);
-                setAuthChildId(null);
-                logoutFromPlan();
+                if (session) logout();
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-amber-500 focus:outline-none disabled:opacity-50"
             >
@@ -321,8 +331,6 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
               onChange={(e) => {
                 setSelectedPlanId(e.target.value);
                 setSelectedChildId(null);
-                setAuthChildId(null);
-                logoutFromPlan();
               }}
               className="w-full rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 px-4 py-2.5 text-sm font-medium text-slate-800 dark:text-slate-100 focus:ring-2 focus:ring-amber-500 focus:outline-none disabled:opacity-50"
             >
@@ -338,7 +346,7 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
         </div>
 
         {/* 4. Child Selection & Password Auth */}
-        {activePlan && (
+        {selectedPlanMeta && (
           <div className="border-t border-slate-200 dark:border-slate-700 pt-5 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <label className="text-xs font-bold uppercase tracking-wider text-amber-800 dark:text-amber-400 flex items-center gap-1.5">
@@ -352,7 +360,9 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
               )}
             </div>
 
-            {authChildId === null ? (
+            {session && authChildId === null ? (
+              <p className="text-xs text-slate-500 dark:text-slate-400 p-3">Chargement du plan…</p>
+            ) : authChildId === null ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5 max-h-56 overflow-y-auto p-2.5 bg-slate-50 dark:bg-slate-900/50 rounded-xl border border-slate-200 dark:border-slate-700">
                 {childrenInPlan.map((ch, chIdx) => {
                   const chPhoto = getStudentPhoto(ch.name, ch.photoUrl);
@@ -407,11 +417,7 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
                   👋 Consultation active pour <strong>{authenticatedChildObj?.name}</strong>.
                 </p>
                 <button
-                  onClick={() => {
-                    setAuthChildId(null);
-                logoutFromPlan();
-                    setSelectedChildId(null);
-                  }}
+                  onClick={logout}
                   className="px-3 py-1 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded border border-slate-300 dark:border-slate-600 hover:bg-slate-100 font-bold"
                 >
                   Déconnexion Parent
@@ -436,7 +442,7 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
                 </div>
 
                 <p className="text-xs text-slate-600 dark:text-slate-300">
-                  Entrez le mot de passe (par défaut : <code className="font-bold bg-white dark:bg-slate-800 px-1 py-0.5 rounded border border-slate-300">0000</code>).
+                  Saisissez le mot de passe de votre enfant (le même que dans son espace élève). Pour une toute première connexion, c'est <code className="font-bold bg-white dark:bg-slate-800 px-1 py-0.5 rounded border border-slate-300">0000</code> ou celui donné par l'enseignant.
                 </p>
 
                 <div className="flex gap-2">
@@ -450,9 +456,10 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
                   />
                   <button
                     type="submit"
-                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-lg shadow-sm"
+                    disabled={busy || !passwordInput}
+                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold text-xs rounded-lg shadow-sm"
                   >
-                    Valider
+                    {busy ? '…' : 'Valider'}
                   </button>
                 </div>
 
@@ -472,7 +479,7 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
                     🔒 Première connexion : Personnalisation du mot de passe
                   </h4>
                   <p className="text-xs mt-1">
-                    Le mot de passe est actuellement la valeur par défaut (<code className="font-bold">0000</code>). Définissez un nouveau mot de passe personnel.
+                    Choisissez un mot de passe personnel. Il remplacera « 0000 » et servira aussi à votre enfant dans son espace élève.
                   </p>
                 </div>
 
@@ -741,7 +748,7 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
           </PlanZoomPanContainer>
 
         </div>
-      ) : activePlan ? (
+      ) : selectedPlanMeta ? (
         <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 rounded-2xl p-8 text-center space-y-2">
           <p className="text-sm font-bold text-amber-900 dark:text-amber-200">
             👈 Saisissez le mot de passe de votre enfant ci-dessus pour afficher son plan de classe.
@@ -753,10 +760,10 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
             <GridIcon className="h-8 w-8" />
           </div>
           <h3 className="text-lg font-bold text-slate-800 dark:text-slate-100">
-            Aucun plan sélectionné
+            {loading ? 'Chargement des classes…' : directoryError ? 'Impossible de charger les classes' : 'Choisissez la classe de votre enfant'}
           </h3>
           <p className="text-xs text-slate-500 max-w-md mx-auto">
-            Veuillez choisir un enseignant, une classe et une période dans les filtres ci-dessus.
+            {directoryError || planError || "Choisissez l'enseignant, la classe et la période dans les menus ci-dessus."}
           </p>
         </div>
       )}

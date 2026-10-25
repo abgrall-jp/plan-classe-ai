@@ -1,7 +1,62 @@
 rules_version = '2';
-// Le navigateur n'accède plus jamais à la base : tout passe par le serveur (server.ts), qui utilise un compte de service.
+// Règles de la base du Plan de Classe IA (version o2switch).
+// Enseignants et administrateur : compte Firebase avec adresse e-mail. Chaque enseignant ne voit que ses données.
+// Élèves et parents : aucun accès direct à la base. Ils passent par le serveur (server.ts), qui vérifie
+// le mot de passe et ne renvoie que le plan de leur classe, sans mots de passe ni remarques sur les camarades.
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function emailUser() { return signedIn() && request.auth.token.get('email', '') != ''; }
+    function isAdmin() {
+      return emailUser() && request.auth.token.email == 'alimatlea@gmail.com' && request.auth.token.email_verified == true;
+    }
+    // Propriétaire d'un document : le champ teacherId est le compte de l'enseignant.
+    function owns(data) { return emailUser() && data.get('teacherId', '') == request.auth.uid; }
+    function canRead() { return isAdmin() || owns(resource.data); }
+    function canCreate() { return isAdmin() || owns(request.resource.data); }
+    function canUpdate() { return isAdmin() || (owns(resource.data) && owns(request.resource.data)); }
+    function canDelete() { return resource == null || isAdmin() || owns(resource.data); }
+
+    // Plans publiés (places, grille, photos) : l'enseignant propriétaire et l'administrateur.
+    match /publishedPlans/{planId} {
+      allow read: if canRead();
+      allow create: if canCreate();
+      allow update: if canUpdate();
+      allow delete: if canDelete();
+    }
+
+    // Mots de passe et remarques des élèves, rangés à part : mêmes règles.
+    match /planSecrets/{planId} {
+      allow read: if canRead();
+      allow create: if canCreate();
+      allow update: if canUpdate();
+      allow delete: if canDelete();
+    }
+
+    // Photos des élèves : propres à chaque enseignant.
+    match /studentPhotos/{photoId} {
+      allow read: if canRead();
+      allow create: if canCreate() && (isAdmin() || photoId.matches(request.auth.uid + '_.*'));
+      allow update: if canUpdate();
+      allow delete: if canDelete();
+    }
+
+    // Listes de classes enregistrées (sans photos) : un document par enseignant.
+    match /classRosters/{teacherId} {
+      allow read, write: if isAdmin() || (emailUser() && request.auth.uid == teacherId);
+    }
+
+    // Fiches des enseignants : chacun la sienne ; personne ne se donne lui-même le rôle d'administrateur.
+    match /teachers/{teacherId} {
+      allow read: if isAdmin() || (emailUser() && request.auth.uid == teacherId);
+      allow create: if isAdmin() || (emailUser() && request.auth.uid == teacherId
+                       && request.resource.data.get('role', 'teacher') == 'teacher');
+      allow update: if isAdmin() || (emailUser() && request.auth.uid == teacherId
+                       && request.resource.data.get('role', 'teacher') == resource.data.get('role', 'teacher'));
+      allow delete: if isAdmin();
+    }
+
+    // Tout le reste (crédits IA, paiements...) : serveur uniquement.
     match /{document=**} {
       allow read, write: if false;
     }
