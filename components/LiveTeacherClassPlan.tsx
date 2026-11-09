@@ -13,6 +13,7 @@ import {
 } from '../services/planSharingService';
 import { getStudentPhoto } from '../services/photoLibraryService';
 import { PlanZoomPanContainer } from './PlanZoomPanContainer';
+import { AuPremierPlan } from './AuPremierPlan';
 import { TeacherStudentRemarksModal } from './TeacherStudentRemarksModal';
 import { ObstacleRenderer } from './ObstacleRenderer';
 import { ObstaclePickerModal } from './ObstaclePickerModal';
@@ -982,8 +983,9 @@ export const LiveTeacherClassPlan: React.FC<LiveTeacherClassPlanProps> = ({
 
       {/* Photo Preview Modal Zoom */}
       {photoModalData && (
+        <AuPremierPlan>
         <div
-          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4"
+          className="fixed inset-0 z-[100] bg-black/85 backdrop-blur-sm flex items-center justify-center p-4"
           onClick={() => setPhotoModalData(null)}
         >
           <div
@@ -1011,6 +1013,7 @@ export const LiveTeacherClassPlan: React.FC<LiveTeacherClassPlanProps> = ({
             </button>
           </div>
         </div>
+        </AuPremierPlan>
       )}
 
       {/* Teacher Student Remarks Modal */}

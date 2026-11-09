@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { AuPremierPlan } from './AuPremierPlan';
 import { StudentPlacement, StudentPeriodRemark, PublishedPlan } from '../types';
 import { getStudentPhoto } from '../services/photoLibraryService';
 import { saveStudentRemark, deleteStudentRemark, getStudentRemarks } from '../services/planSharingService';
@@ -120,8 +121,9 @@ export const TeacherStudentRemarksModal: React.FC<TeacherStudentRemarksModalProp
   ];
 
   return (
+    <AuPremierPlan>
     <div
-      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
+      className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
       onClick={onClose}
     >
       <div
@@ -438,5 +440,6 @@ export const TeacherStudentRemarksModal: React.FC<TeacherStudentRemarksModalProp
         </div>
       </div>
     </div>
+    </AuPremierPlan>
   );
 };

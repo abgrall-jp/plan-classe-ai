@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { compressImageToWebP } from '../services/photoLibraryService';
+import { AuPremierPlan } from './AuPremierPlan';
 
 export interface PhotoModalData {
   name: string;
@@ -51,11 +52,12 @@ export const StudentPhotoModal: React.FC<StudentPhotoModalProps> = ({
   };
 
   return (
+    <AuPremierPlan>
     <div
       role="dialog"
       aria-modal="true"
       onClick={onClose}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-150"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-150"
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -162,5 +164,6 @@ export const StudentPhotoModal: React.FC<StudentPhotoModalProps> = ({
         </div>
       </div>
     </div>
+    </AuPremierPlan>
   );
 };
