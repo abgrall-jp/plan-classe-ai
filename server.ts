@@ -106,7 +106,7 @@ function makeLimiter(max: number, windowMs: number) {
   };
 }
 
-const loginLimiter = makeLimiter(10, 15 * 60 * 1000);
+const loginLimiter = makeLimiter(10, 5 * 60 * 1000); // 10 essais, blocage 5 minutes (annoncé sous le mot de passe)
 const publicLimiter = makeLimiter(240, 60 * 1000);
 const seatLimiter = makeLimiter(60, 60 * 1000);
 const aiTeacherLimiter = makeLimiter(Number(process.env.AI_MAX_PER_TEACHER_15MIN) || 300, 15 * 60 * 1000);
@@ -422,7 +422,7 @@ app.post("/api/portal/login", async (req, res) => {
     return res.status(400).json({ error: "Choisis d'abord ta classe et ton nom dans la liste." });
   }
   if (!loginLimiter(`login:${clientIp(req)}:${planId}:${studentId}`)) {
-    return res.status(429).json({ error: "Trop d'essais. Réessaie dans 15 minutes." });
+    return res.status(429).json({ error: "Trop d'essais. Réessaie dans 5 minutes." });
   }
   try {
     const { plan, secret } = await getPlan(planId);

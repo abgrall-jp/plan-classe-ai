@@ -594,6 +594,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ onBackToHome }) =>
                       {busy ? '…' : 'Valider'}
                     </button>
                   </div>
+                  <p className="text-xs font-bold text-amber-500 dark:text-amber-400">⚠️ Attention : après 10 essais ratés, la connexion est bloquée 5 minutes.</p>
 
                   {passwordError && (
                     <p className="text-xs font-semibold text-red-600 dark:text-red-400">
