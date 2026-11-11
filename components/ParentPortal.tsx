@@ -169,7 +169,8 @@ export const ParentPortal: React.FC<ParentPortalProps> = ({ onBackToHome }) => {
     try {
       const r = await portalLogin({ planId: selectedPlanId, studentId: selectedChildId, pin: passwordInput, role: 'parent' });
       if (r.needsNewPin) {
-        setShowPasswordChangeModal(true);
+        // Espace parents en lecture seule : seul l'élève choisit son mot de passe personnel.
+        setPasswordError("Votre enfant doit d'abord se connecter dans l'espace élève pour choisir son mot de passe personnel.");
       } else if (r.token && r.student) {
         openSession(r.token, r.student);
         showToast('Connexion réussie !');
