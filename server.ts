@@ -436,7 +436,9 @@ app.post("/api/portal/login", async (req, res) => {
           : "Mot de passe incorrect. En cas d'oubli, ton enseignant peut le remettre à zéro.",
       });
     }
-    if (entry.isDefault || entry.password === "0000") {
+    // Un parent consulte seulement : il ne choisit jamais le mot de passe de l'enfant (lecture seule).
+    if (role === "parent" && newPin) return res.status(403).json({ error: "Espace parents en lecture seule : le mot de passe se change dans l'espace élève." });
+    if (role !== "parent" && (entry.isDefault || entry.password === "0000")) {
       if (!newPin) return res.json({ needsNewPin: true });
       if (newPin.length < 4) return res.status(400).json({ error: "Le mot de passe doit comporter au moins 4 caractères." });
       if (newPin === "0000" || newPin === entry.password) return res.status(400).json({ error: "Choisis un mot de passe personnel, différent du mot de passe de départ." });
